@@ -489,7 +489,7 @@ async def test_native_images_preserve_json_auth_and_never_follow_custom_model_ru
     response = await codex_client.post(
         f"/v1/images/{operation}?test=true", content=raw,
         headers={"authorization": "Bearer native-client-token", "content-type": "application/json",
-                 "x-codex-image-turn-id": "turn-image-1"},
+                 "x-codex-image-turn-id": "turn-image-1", "Accept-Encoding": "gzip, deflate"},
     )
     assert response.status_code == 200
     assert response.json() == response_body
@@ -498,6 +498,7 @@ async def test_native_images_preserve_json_auth_and_never_follow_custom_model_ru
     assert forwarded is not None and forwarded.content == raw
     assert forwarded.headers["authorization"] == "Bearer native-client-token"
     assert forwarded.headers["x-codex-image-turn-id"] == "turn-image-1"
+    assert forwarded.headers["accept-encoding"] == "identity"
     event = Monitor.current().snapshot()["events"][0]
     assert event["provider"] == "codex_openai"
     assert event["endpoint"] == f"images/{operation}"
