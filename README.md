@@ -57,6 +57,17 @@ Tool calls, tool results, images and encrypted reasoning stay in their native
 format. This entrance requires an upstream that supports Responses; it does
 not translate Anthropic-only or Chat Completions-only upstreams into Responses.
 
+Codex's built-in image tool also uses its configured provider base URL.
+The router forwards native JSON `POST /v1/images/generations` and
+`POST /v1/images/edits` through the authenticated `responses_default` below.
+These requests always use that trusted native fallback, independently of the
+selected assistant model and custom routing rules. With the existing Codex
+ChatGPT sign-in, no additional server-side OpenAI API key is needed; account
+access and quotas are enforced upstream. Own-key custom providers do not
+receive the native image request or client credentials. Image requests reuse
+the native transport and cleanup, bypass Responses tool adaptation, and do
+not contribute to text-generation TPS or inherit text-model pricing.
+
 For a Kimi Code subscription, add this provider and rule to `routing.yaml`
 (or add the new fields to an existing Kimi Code provider/rule):
 
@@ -273,7 +284,8 @@ only inference. The setup steps are in the "Forward-proxy" section below.
 `make run`. Claude Code sets `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` and
 needs no certificate. The same listener serves the Messages endpoints,
 `/health`, the dashboard and metrics, plus Codex's `/v1/responses`,
-`/v1/models` and `/codex/models`. Claude Code's picker is still built by
+`/v1/models`, `/codex/models` and the native JSON Images endpoints above.
+Claude Code's picker is still built by
 `make sync-client-config`; the Codex setup is described above.
 
 This is the router's plain HTTP API: any client that only takes a base URL

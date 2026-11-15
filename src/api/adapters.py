@@ -1,4 +1,4 @@
-"""Shared HTTP-boundary code for the ``/v1/messages*`` endpoints.
+"""Shared HTTP-boundary code for Messages and native OpenAI endpoints.
 
 Parsing the request body and extracting the model name used to be
 duplicated byte-for-byte between ``api/messages.py`` and
@@ -75,6 +75,16 @@ def parse_model(raw_body: bytes) -> str | JSONResponse:
             content=anthropic_error_body("invalid_request_error", "Missing 'model' field"),
         )
     return model
+
+
+def openai_error(
+    message: str, status: int = 400, *, code: str = "invalid_request",
+) -> JSONResponse:
+    """Build the shared error shape for native OpenAI client protocols."""
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"message": message, "type": code, "code": code, "param": None}},
+    )
 
 
 def to_fastapi_response(result: ProviderResult) -> Response:
