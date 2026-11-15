@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.6.1] - 2026-11-16
+
+### Fixed
+
+- show independent Messages, Codex Responses and Codex Images endpoint defaults in the dashboard Routing panel, including unavailable defaults and the authenticated native Images policy; preserve shared model rules and clarify that configuration changes require a restart ([#50](https://github.com/kskadart/open-harness-router/pull/50))
+
 ## [0.6.0] - 2026-11-15
 
 ### Added
