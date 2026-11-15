@@ -171,14 +171,14 @@ ORDER BY bucket ASC
 """
 
 # What a request must look like to carry a throughput figure: a streamed
-# ``/v1/messages`` answer with a known first-token time, some output tokens
+# ``/v1/messages`` or ``/v1/responses`` answer with a known first-token time, some output tokens
 # and a generation window (the total duration minus the time to the first
 # token) long enough to mean something. A gateway that buffers the stream
 # delivers every token in one burst at the end, which would read as tens of
 # thousands of tok/s; a generation window under ``TPS_MIN_GENERATION_MS``
 # carries no throughput signal at all.
 _TPS_QUALIFY = (
-    "endpoint = 'messages' AND stream = 1 AND ttft_ms IS NOT NULL "
+    "endpoint IN ('messages', 'responses') AND stream = 1 AND ttft_ms IS NOT NULL "
     "AND output_tokens > 0 AND model IS NOT NULL "
     "AND (duration_ms - ttft_ms) >= ?"
 )

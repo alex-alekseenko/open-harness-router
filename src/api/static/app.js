@@ -917,6 +917,9 @@ function Header(props) {
         <div class="brand">
           <span class="title">open-harness-router</span>
           <span class="fact">version <b>${state ? state.version || "?" : "…"}</b></span>
+          ${state && state.restart_required
+            ? html`<span class="pill">checkout ${state.checkout_version} · restart required</span>`
+            : null}
           <span class="fact">pid <b>${state ? state.pid : "…"}</b></span>
           <span class="fact">up <b>${state ? fmtDur(state.uptime_s) : "…"}</b></span>
         </div>
@@ -1393,7 +1396,7 @@ function App() {
           config=${tpsConfig}
           configKey=${tpsKey}
           version=${version}
-          emptyText="No streamed /v1/messages in this window"
+          emptyText="No timed streamed requests in this window. New streams appear after they finish."
         />
       </div>
       <${ProvidersTable}
