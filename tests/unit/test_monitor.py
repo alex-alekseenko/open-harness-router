@@ -66,6 +66,18 @@ def test_scanner_reads_unary_json_usage() -> None:
     assert scanner.usage.output_tokens == 5
 
 
+def test_scanner_reads_native_responses_cache_usage() -> None:
+    """Responses includes cache reads in input_tokens; don't count or price them twice."""
+    scanner = UsageScanner()
+    scanner.feed_json(json.dumps({"usage": {
+        "input_tokens": 100, "input_tokens_details": {"cached_tokens": 40},
+        "output_tokens": 10,
+    }}).encode())
+    assert scanner.usage.input_tokens == 60
+    assert scanner.usage.cache_read_input_tokens == 40
+    assert scanner.usage.total() == 110
+
+
 def test_scanner_ignores_unparseable_bodies() -> None:
     scanner = UsageScanner()
     scanner.feed_json(b"not json")

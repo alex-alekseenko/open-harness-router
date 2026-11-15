@@ -1,10 +1,11 @@
-.PHONY: install run run-proxy sync-client-config test lint typecheck full-check freeze
+.PHONY: install run run-proxy sync-client-config sync-codex-config test lint typecheck full-check freeze
 
 install:
 	uv sync
 
 run:
 	uv run uvicorn main:create_app --factory \
+	  --ws websockets \
 	  --host $${ROUTER_SERVER_HOST:-127.0.0.1} \
 	  --port $${ROUTER_SERVER_PORT:-8787} \
 	  --app-dir src
@@ -16,6 +17,9 @@ run-proxy:
 # the /model picker rows and the unknown-model window enforcement switch.
 sync-client-config:
 	PYTHONPATH=src uv run python -m cli.sync_client_config
+
+sync-codex-config:
+	PYTHONPATH=src uv run python -m cli.sync_codex_config
 
 test:
 	uv run pytest -q

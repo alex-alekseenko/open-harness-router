@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -113,6 +114,26 @@ class PricingCfg(BaseModel):
         ) / 1_000_000
 
 
+class CodexModelCfg(BaseModel):
+    """Optional capabilities advertised to Codex, independent of Messages limits."""
+
+    display_name: str | None = None
+    context_window: int | None = Field(default=None, gt=0)
+    reasoning_efforts: list[ReasoningEffort] = Field(default_factory=list)
+    default_reasoning_effort: ReasoningEffort | None = None
+    input_modalities: list[Literal["text", "image"]] = ["text"]
+
+    @model_validator(mode="after")
+    def _validate_default_effort(self) -> CodexModelCfg:
+        """A default must be one of the advertised reasoning levels."""
+        if (
+            self.default_reasoning_effort is not None
+            and self.default_reasoning_effort not in self.reasoning_efforts
+        ):
+            raise ValueError("default_reasoning_effort must be included in reasoning_efforts")
+        return self
+
+
 class RoutingRule(BaseModel):
     """A routing rule: match -> provider (+ model substitution and limits).
 
@@ -133,6 +154,7 @@ class RoutingRule(BaseModel):
     max_tokens_limit: int | None = None
     context_window: int | None = None
     client_models: list[str] = Field(default_factory=list)
+    codex: CodexModelCfg | None = None
     pricing: PricingCfg | None = None
 
 
@@ -269,7 +291,7 @@ class ProviderCfg(BaseModel):
     tools are dropped while built-in Claude Code tools are kept. ``0`` means
     no limit (passthrough/providers with no known limit).
 
-    ``api_flavor`` -- which OpenAI endpoint to use: ``chat`` (the classic
+    ``api_flavor`` -- which OpenAI endpoint Messages translation uses: ``chat`` (the classic
     /v1/chat/completions) or ``responses`` (/v1/responses). ``responses`` is
     only valid for ``openai-translate``: on /v1/chat/completions the GPT-5.6
     family can't combine function tools with reasoning (the upstream returns
@@ -347,6 +369,11 @@ class ProviderCfg(BaseModel):
 
     type: ProviderType
     base_url: str
+    # Explicit opt-in to native Codex/Responses forwarding. Includes the API
+    # version prefix, e.g. https://api.kimi.com/coding/v1.
+    responses_base_url: str | None = None
+    responses_forward_client_auth: bool = False
+    responses_custom_tools_as_functions: list[str] = Field(default_factory=list)
     api_key_env: str | None = None
     ca_bundle: str | None = None
     tls_verify_hostname: bool = True
@@ -365,6 +392,25 @@ class ProviderCfg(BaseModel):
     api_flavor: ApiFlavor = "chat"
     reasoning_effort: ReasoningEffort = "medium"
     pricing: PricingCfg | None = None
+
+    @model_validator(mode="after")
+    def _validate_responses_base_url(self) -> ProviderCfg:
+        """Credential forwarding requires a separate explicit opt-in for native Responses."""
+        if self.responses_forward_client_auth and (
+            self.responses_base_url is None
+            or self.type != "passthrough"
+            or not self.forward_client_auth
+        ):
+            raise ValueError(
+                "responses_forward_client_auth requires responses_base_url and "
+                "passthrough with forward_client_auth=true"
+            )
+        if self.responses_base_url is not None:
+            if not self.api_key_env and not self.responses_forward_client_auth:
+                raise ValueError("responses_base_url requires api_key_env")
+            if not self.responses_base_url.startswith(("https://", "http://")):
+                raise ValueError("responses_base_url must be an HTTP(S) URL")
+        return self
 
     @model_validator(mode="after")
     def _validate_drop_params(self) -> ProviderCfg:
@@ -389,8 +435,8 @@ class ProviderCfg(BaseModel):
     def _validate_api_flavor(self) -> ProviderCfg:
         """Forbid ``api_flavor="responses"`` outside of openai-translate.
 
-        The Responses API requires request translation; passthrough forwards
-        byte-for-byte and can't use it.
+        Messages translation chooses an OpenAI endpoint with this field.
+        Native Responses ingress is independent and uses responses_base_url.
 
         Returns:
             The validated configuration.
@@ -649,6 +695,8 @@ class RoutingConfig(BaseModel):
     providers: dict[str, ProviderCfg]
     rules: list[RoutingRule]
     default: DefaultRoute
+    responses_default: DefaultRoute | None = None
+    codex_catalog_path: Path | None = None
 
     @model_validator(mode="after")
     def _validate_references(self) -> RoutingConfig:
@@ -669,6 +717,17 @@ class RoutingConfig(BaseModel):
                 raise ValueError(
                     f"provider '{name}': openai-translate requires 'api_key_env'"
                 )
+
+        if self.codex_catalog_path is not None and self.responses_default is None:
+            raise ValueError("codex_catalog_path requires responses_default")
+
+        if self.responses_default is not None:
+            name = self.responses_default.provider
+            if name not in self.providers:
+                raise ValueError(f"responses_default -> unknown provider '{name}'")
+            cfg = self.providers[name]
+            if cfg.responses_base_url is None and cfg.api_flavor != "responses":
+                raise ValueError("responses_default.provider must support native Responses")
 
         for rule in self.rules:
             if rule.provider not in self.providers:

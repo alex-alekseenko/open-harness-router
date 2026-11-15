@@ -25,9 +25,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +34,7 @@ from pydantic import ValidationError
 from errors import ConfigError
 from routing.config_loader import load_routing_config
 from routing.schema import RouteLimits, RoutingConfig, advertised_model_ids
+from services.config_files import write_text_atomic as write_settings
 from settings import Settings
 
 EXIT_OK = 0
@@ -210,39 +209,6 @@ def render_settings(document: dict[str, Any]) -> str:
         Pretty-printed JSON with a trailing newline.
     """
     return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
-
-
-def write_settings(path: Path, text: str) -> None:
-    """Write the settings file atomically; a failed write keeps the previous version.
-
-    Raises:
-        OSError: the temporary file cannot be written or moved into place.
-    """
-    # os.replace on a symlink would replace the link
-    target = path.resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # tempfile creates 0600; keep the operator's mode
-    existing_mode = target.stat().st_mode & 0o777 if target.exists() else None
-    # SIM115: the handle is closed by the ``with`` below; it is created
-    # outside it so a failure after creation can still remove the file.
-    handle = tempfile.NamedTemporaryFile(  # noqa: SIM115
-        "w",
-        encoding="utf-8",
-        dir=target.parent,
-        prefix=f".{target.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    temp_path = Path(handle.name)
-    try:
-        with handle:
-            handle.write(text)
-        if existing_mode is not None:
-            temp_path.chmod(existing_mode)
-        os.replace(temp_path, target)
-    except OSError:
-        temp_path.unlink(missing_ok=True)
-        raise
 
 
 def _object_section(document: dict[str, Any], key: str) -> dict[str, Any]:

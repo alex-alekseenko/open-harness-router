@@ -144,6 +144,13 @@ class Usage:
             value = payload.get(name)
             if isinstance(value, int) and not isinstance(value, bool):
                 setattr(self, name, value)
+        # Responses input_tokens includes cached input; the dashboard's input
+        # bucket is uncached, with cache reads priced separately.
+        details = payload.get("input_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else None
+        if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
+            self.cache_read_input_tokens = min(cached, self.input_tokens)
+            self.input_tokens -= self.cache_read_input_tokens
 
     def add(self, other: Usage) -> None:
         """Accumulate another response's counts into this one."""
@@ -248,7 +255,10 @@ class UsageScanner:
         if not isinstance(payload, dict):
             return
         event_type = payload.get("type")
-        if event_type == "content_block_delta":
+        if event_type in {
+            "content_block_delta", "response.output_text.delta",
+            "response.function_call_arguments.delta", "response.reasoning_summary_text.delta",
+        }:
             # The first content token of the answer: the start of the
             # generation window the throughput is measured over. A keepalive
             # ``ping`` and a ``message_start`` are not tokens -- they say
@@ -262,6 +272,9 @@ class UsageScanner:
             usage = message.get("usage") if isinstance(message, dict) else None
         elif event_type == "message_delta":
             usage = payload.get("usage")
+        elif event_type in {"response.completed", "response.incomplete", "response.failed"}:
+            response = payload.get("response")
+            usage = response.get("usage") if isinstance(response, dict) else None
         else:
             return
         if isinstance(usage, dict):

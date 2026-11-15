@@ -11,6 +11,7 @@ from errors import ConfigError
 from providers.base import Provider
 from providers.openai_translate import OpenAITranslateProvider
 from providers.passthrough import PassthroughProvider
+from providers.responses import ResponsesProvider
 from routing.schema import ProviderCfg
 from settings import Settings
 
@@ -102,3 +103,40 @@ def build_provider(name: str, cfg: ProviderCfg, settings: Settings) -> Provider:
 
     api_key = _resolve_required_api_key(name, cfg, settings)
     return OpenAITranslateProvider(name, cfg, api_key, ca_path, settings.upstream)
+
+
+def build_responses_provider(
+    name: str, cfg: ProviderCfg, settings: Settings
+) -> ResponsesProvider | None:
+    """Build a native Responses transport only for an explicitly capable upstream.
+
+    Responses-flavor OpenAI providers already declare this capability. Other
+    providers opt in with ``responses_base_url``. Client auth is forwarded
+    only with a separate explicit opt-in for the client's native provider.
+    """
+    base_url = cfg.responses_base_url
+    if base_url is None and cfg.api_flavor == "responses":
+        base_url = cfg.base_url
+    if base_url is None:
+        return None
+    transport_cfg = ProviderCfg(
+        type="passthrough",
+        base_url=base_url,
+        forward_client_auth=cfg.responses_forward_client_auth,
+        api_key_env=cfg.api_key_env,
+        ca_bundle=cfg.ca_bundle,
+        tls_verify_hostname=cfg.tls_verify_hostname,
+        timeout_s=cfg.timeout_s,
+        stream_read_timeout_s=cfg.stream_read_timeout_s,
+        extra_headers=cfg.extra_headers,
+        responses_custom_tools_as_functions=cfg.responses_custom_tools_as_functions,
+    )
+    return ResponsesProvider(
+        name,
+        transport_cfg,
+        settings.upstream,
+        None
+        if cfg.responses_forward_client_auth
+        else _resolve_required_api_key(name, cfg, settings),
+        _resolve_ca_bundle(name, cfg, settings),
+    )

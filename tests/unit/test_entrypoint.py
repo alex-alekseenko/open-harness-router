@@ -20,8 +20,10 @@ would kill the test process.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
+import httpx
 import pytest
 
 import entrypoint
@@ -32,6 +34,49 @@ from routing.registry import ProviderRegistry
 from settings import Settings
 
 _POLL_ATTEMPTS = 200
+
+
+async def test_codex_http_fallback_completes_the_real_websocket_handshake(
+    entrypoint_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 426 denial must reach Codex without a server-side handshake error."""
+    registry = _build_registry(entrypoint_settings)
+    monkeypatch.setattr(entrypoint, "build_runtime", lambda: (entrypoint_settings, registry))
+    servers: list[entrypoint._CoordinatedServer] = []
+    errors: list[str] = []
+    monkeypatch.setattr(
+        logging.getLogger("uvicorn.error"),
+        "error",
+        lambda message, *args, **kwargs: errors.append(str(message)),
+    )
+
+    class RecordingServer(entrypoint._CoordinatedServer):
+        def __init__(self, config: object, stop_requested: asyncio.Event) -> None:
+            super().__init__(config, stop_requested)  # type: ignore[arg-type]
+            servers.append(self)
+
+    monkeypatch.setattr(entrypoint, "_CoordinatedServer", RecordingServer)
+    task = asyncio.create_task(entrypoint.run())
+    try:
+        await _poll_until(lambda: servers and servers[0].started, "HTTP listener started")
+        port = servers[0].servers[0].sockets[0].getsockname()[1]
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.get(
+                f"http://127.0.0.1:{port}/v1/responses",
+                headers={
+                    "connection": "Upgrade",
+                    "upgrade": "websocket",
+                    "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+                    "sec-websocket-version": "13",
+                },
+            )
+        assert response.status_code == 426
+    finally:
+        if servers:
+            servers[0].request_stop()
+        await asyncio.wait_for(task, timeout=5)
+    assert errors == []
 
 
 def _spy_close_all(registry: ProviderRegistry) -> list[int]:
@@ -48,9 +93,7 @@ def _spy_close_all(registry: ProviderRegistry) -> list[int]:
 
 
 @pytest.fixture
-def entrypoint_settings(
-    _env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Settings:
+def entrypoint_settings(_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     """Entry point settings on free loopback ports (not 8787/8788)."""
     monkeypatch.setenv("ROUTER_SERVER_HOST", "127.0.0.1")
     monkeypatch.setenv("ROUTER_SERVER_PORT", "0")

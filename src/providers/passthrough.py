@@ -427,9 +427,7 @@ class PassthroughProvider:
                     error=str(exc),
                 )
                 if not await client_channel.is_disconnected():
-                    yield stream_error_event(
-                        _BAD_GATEWAY, UPSTREAM_STREAM_INTERRUPTED_MESSAGE
-                    ).encode()
+                    yield self._stream_error_frame()
             finally:
                 await upstream.aclose()
 
@@ -441,6 +439,10 @@ class PassthroughProvider:
             # covers a body that never runs (httpx's aclose is idempotent).
             release=upstream.aclose,
         )
+
+    def _stream_error_frame(self) -> bytes:
+        """Return an error frame in the client protocol after headers were sent."""
+        return stream_error_event(_BAD_GATEWAY, UPSTREAM_STREAM_INTERRUPTED_MESSAGE).encode()
 
     async def handle_messages(
         self,

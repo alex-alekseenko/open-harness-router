@@ -122,6 +122,10 @@ async def run() -> None:
             app=app,
             host=settings.server.host,
             port=settings.server.port,
+            # Uvicorn 0.51's automatic SansIO backend logs a false incomplete-
+            # handshake error after an HTTP denial. The classic backend handles
+            # the 426 denial Codex uses for immediate HTTP fallback correctly.
+            ws="websockets",
             # setup_logging (inside build_runtime, already ran above) configured
             # structlog/JSON for the whole process -- uvicorn's own
             # logging.dictConfig (otherwise run when Config is created, before

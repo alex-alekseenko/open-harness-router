@@ -4,13 +4,14 @@
 
 ![The dashboard: request, error, in-flight, token and cost tiles, per-provider and per-model tables, the requests in flight, the event feed and the routing table](docs/dashboard.png)
 
-Run models from any vendor inside the Claude Code CLI. The router is one program
-that accepts requests in the Anthropic Messages API format
-(`POST /v1/messages`), so Claude Code connects to it as if it were Anthropic
-itself. For each request the router reads the model name and, by the rules in
-`routing.yaml`, sends it to one of the configured providers. Anthropic models go
-to Anthropic unchanged (passthrough). Every other model is translated into the
-OpenAI format and sent to a third-party API: OpenAI GPT-5.x (including the
+Run models from any vendor inside the Claude Code CLI, and native Responses
+models inside the Codex CLI. The router accepts Anthropic Messages
+(`POST /v1/messages`) and OpenAI Responses (`POST /v1/responses`). For each
+request it reads the model name and, by the rules in `routing.yaml`, sends it
+to one of the configured providers. Codex requests use native Responses
+forwarding. Claude Code's Anthropic requests go to Anthropic unchanged
+(passthrough); other models use a compatible passthrough or translation into
+the OpenAI format: OpenAI GPT-5.x (including the
 Responses API, needed for reasoning models with tools), Kimi (Moonshot AI), Qwen
 (Alibaba Cloud Model Studio), Grok (xAI), GLM behind a corporate
 OpenAI-compatible gateway, DeepSeek, OpenRouter, or a local vLLM instance.
@@ -46,6 +47,169 @@ uv sync
 cp .env.example .env                    # no required key to start, see below
 cp routing.example.yaml routing.yaml    # personal provider registry, not committed to the repo
 ```
+
+## Connecting Codex
+
+Codex connects to the HTTP listener using the OpenAI Responses protocol:
+`POST /v1/responses`. The router applies the same first-match routing rules
+as for Claude Code, then forwards native request bodies and streaming events.
+Tool calls, tool results, images and encrypted reasoning stay in their native
+format. This entrance requires an upstream that supports Responses; it does
+not translate Anthropic-only or Chat Completions-only upstreams into Responses.
+
+For a Kimi Code subscription, add this provider and rule to `routing.yaml`
+(or add the new fields to an existing Kimi Code provider/rule):
+
+```yaml
+providers:
+  kimi_code:
+    type: passthrough
+    base_url: https://api.kimi.com/coding/
+    responses_base_url: https://api.kimi.com/coding/v1
+    responses_custom_tools_as_functions: [exec]
+    forward_client_auth: false
+    api_key_env: KIMI_API_KEY
+    auth_header: x-api-key
+
+rules:
+  - match: {type: prefix, value: "kimi-"}
+    provider: kimi_code
+    client_models: ["kimi-for-coding"]
+    codex:
+      display_name: Kimi K2.8 Preview (kimi-for-coding)
+      context_window: 1048576
+      reasoning_efforts: [low, high, max]
+      default_reasoning_effort: high
+      input_modalities: [text, image]
+```
+
+Keep the existing native Anthropic provider, its rules and the default route.
+Set `KIMI_API_KEY` in the router's `.env`. The router uses the same provider
+key for both clients; Codex does not need a copy of the key. Messages uses
+the configured `auth_header`; own-key native Responses uses Bearer auth.
+The example capabilities follow the
+[Kimi Code Codex guide](https://www.kimi.com/code/docs/en/third-party-tools/codex.html);
+adjust them for the model and membership tier you use.
+
+To keep **all normal Codex models plus custom models in the same picker**,
+add a native Responses fallback and merge the catalog from your normal Codex
+installation. For ChatGPT subscription sign-in:
+
+```yaml
+providers:
+  # Add alongside anthropic and kimi_code, not instead of them.
+  codex_openai:
+    type: passthrough
+    base_url: https://chatgpt.com/backend-api/codex
+    responses_base_url: https://chatgpt.com/backend-api/codex
+    forward_client_auth: true
+    responses_forward_client_auth: true
+
+# Top-level fields, separate from the Anthropic default.
+responses_default:
+  provider: codex_openai
+codex_catalog_path: ~/.codex/models_cache.json
+```
+
+Start normal Codex once to populate its account catalog before generating the
+combined profile. The generator preserves every native model's capabilities
+and visibility and appends custom models. It uses the first native catalog
+entry as the default unless `--model` selects another entry. Explicit routing
+rules still take precedence over `responses_default`. The existing `default`
+continues to control Messages requests.
+
+Custom catalog entries receive model-specific identity instructions while
+retaining the native coding workflow. Without them Codex's default prompt
+identifies the agent as GPT-6 even when inference goes to another vendor.
+Use the router's route/upstream logs to verify routing; model self-reports
+alone are not evidence of the serving backend. Restart Codex after regenerating
+the catalog so it loads the updated model instructions.
+
+The combined profile keeps OpenAI authentication enabled: Codex supplies its
+existing subscription credential, and the native fallback forwards it back
+to the configured OpenAI endpoint. Own-key custom providers still strip that
+credential and inject their own key. For OpenAI API-key sign-in, use
+`https://api.openai.com/v1` for both native URLs instead. Choose the endpoint
+matching your sign-in method. The router never reads Codex's authentication
+file or stores its login tokens.
+
+```bash
+PYTHONPATH=src uv run python -m cli.validate_routing --expect-provider kimi_code kimi-for-coding
+make full-check
+# Start the HTTP listener, or restart your existing router service after validation.
+make run
+```
+
+In another terminal, generate and install a dedicated Codex profile:
+
+```bash
+make sync-codex-config  # preview files under state/codex/, no user defaults changed
+PYTHONPATH=src uv run python -m cli.sync_codex_config --output-dir ~/.codex
+codex -p open-harness-router
+```
+
+In Codex CLI 0.169.0, `/model` lists the native catalog plus **Kimi K2.8 Preview**
+(`kimi-for-coding`) when the fallback/catalog settings above are configured.
+Without those settings, it lists only the explicitly configured custom models.
+The profile uses a separate `open-harness-router.config.toml` and local catalog.
+For native-auth configurations it keeps `model_provider = "openai"` and sets
+`openai_base_url` to the router. This preserves the provider identity saved in
+normal Codex sessions, so they can be resumed through the same profile:
+
+```bash
+codex -p open-harness-router resume SESSION_ID
+```
+
+The profile disables request-body compression so the router can read the model
+field. The router declines WebSocket handshakes with Codex's HTTP fallback
+signal (426), and streaming continues over HTTP without repeated reconnects.
+The combined entrypoint and `make run` select Uvicorn's `websockets` backend;
+use `--ws websockets` for a custom Uvicorn command too. The pinned Uvicorn
+version's automatic SansIO backend logs an incomplete-handshake error after
+an otherwise successful denial response.
+Custom-only configurations still use their dedicated provider identity.
+
+Earlier router profiles used `open-harness-router` as the provider identity even
+with native models. The generator retains that provider definition for those
+saved sessions; select it explicitly when resuming one of them:
+
+```bash
+codex -p open-harness-router -c 'model_provider="open-harness-router"' resume SESSION_ID
+```
+
+Do not edit session metadata to change providers. Close a session in its
+previous window/client before resuming it elsewhere: Codex allows only one
+active writer per saved session.
+
+Use `--base-url http://127.0.0.1:PORT/v1` when generating the profile if your
+HTTP listener uses a different port. Profiles in this form were verified
+with CLI 0.169.0. Desktop setup and picker behavior must be verified separately;
+the generated profile does not change the desktop's default provider.
+
+Providers with `api_flavor: responses` also support native forwarding using
+their existing `base_url`. Other providers must opt in with
+`responses_base_url`, including the API prefix (usually `/v1`). Only explicit
+model ids from exact rules or `client_models` are listed. Optional `codex`
+metadata controls the display name, client context window, supported/default
+reasoning efforts and input modalities; it does not change upstream limits.
+Native Responses requests bypass the Messages translation settings, including
+`drop_params`, token caps and quota waiting; the upstream enforces its limits.
+
+For upstreams that only support `apply_patch` as a freeform custom tool,
+`responses_custom_tools_as_functions: [exec]` adapts Codex Code Mode's `exec`
+to a JSON function tool. The router converts replayed calls and results and
+restores custom tool calls in JSON/SSE responses. Codex still executes the tool.
+Other tools and providers retain their native format. Tool arguments are
+decoded after the complete function arguments arrive. The example label is
+the Kimi API's reported K2.8 Preview model behind `kimi-for-coding`; check the
+upstream `/models` metadata if that vendor-managed alias changes.
+
+`GET /codex/models` serves the combined Codex catalog and `GET /v1/models`
+serves the same ids in the standard OpenAI model-list format. The local
+catalog is regenerated by `make sync-codex-config` (or the installation command)
+after routing edits. A client using remote discovery can instead configure
+`model_catalog_url` to the full `/codex/models` URL; see
+[Codex gateway discovery](https://learn.chatgpt.com/docs/enterprise/roll-out-a-gateway).
 
 ## Run modes
 
@@ -101,10 +265,11 @@ only inference. The setup steps are in the "Forward-proxy" section below.
 
 ### Reverse-proxy
 
-`make run`. The client sets `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` and
-needs no certificate. On 8787 the router serves `/health`, `/v1/messages` and
-`/v1/messages/count_tokens`; any other path answers 404. There is no
-`/v1/models`, so the model picker is built by `make sync-client-config`.
+`make run`. Claude Code sets `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` and
+needs no certificate. The same listener serves the Messages endpoints,
+`/health`, the dashboard and metrics, plus Codex's `/v1/responses`,
+`/v1/models` and `/codex/models`. Claude Code's picker is still built by
+`make sync-client-config`; the Codex setup is described above.
 
 This is the router's plain HTTP API: any client that only takes a base URL
 (Anthropic SDK scripts, other agent frameworks, IDE plugins), `curl`,
@@ -994,9 +1159,10 @@ This is reverse-proxy mode; what the CLI turns off under a custom
 
 ### Model picker and client settings
 
-The `/model` picker does not discover the router's models on its own: gateway
-model discovery keeps only ids containing `claude` or `anthropic`, and the
-router serves no `/v1/models` endpoint anyway. The way to list arbitrary ids
+Claude Code's `/model` picker does not discover the router's models on its own:
+gateway model discovery keeps only ids containing `claude` or `anthropic`.
+The `/v1/models` endpoint added for Codex does not change that filtering.
+The way to list arbitrary ids
 is the `modelPicker.options` setting (Claude Code v2.1.242 and newer), which
 the CLI reads only from managed settings, from a file passed with
 `--settings`, and from user settings.
