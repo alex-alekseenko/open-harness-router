@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.5.2] - 2026-11-15
+
+### Fixed
+
+- restore Codex built-in image generation and editing through native JSON Images endpoints, using only the explicitly authenticated Responses fallback and preserving native credentials, image payloads and request IDs; custom-model rules and own-key fallbacks cannot receive these native image requests, and image usage is recorded without text TPS or pricing ([#45](https://github.com/kskadart/open-harness-router/pull/45))
+
 ## [0.5.1] - 2026-11-15
 
 ### Fixed
