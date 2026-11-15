@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.6.0] - 2026-11-15
+
+### Added
+
+- add a compact dashboard time picker with rolling minute/hour presets, custom local date/time intervals, five recent ranges, keyboard controls and manual refresh; preserve absolute intervals in shared links, normalize offset bounds to UTC for correct filtering, and use the selected Neo Edo samurai icon in the header and browser tab ([#48](https://github.com/kskadart/open-harness-router/pull/48))
+
+### Fixed
+
+- request uncompressed native image responses so Codex can decode successful image generation and editing replies through the router ([#47](https://github.com/kskadart/open-harness-router/pull/47))
+
 ## [0.5.2] - 2026-11-15
 
 ### Fixed
