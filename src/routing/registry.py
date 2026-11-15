@@ -172,6 +172,39 @@ class ProviderRegistry:
         routes.append({"match_type": "default", "provider": self.default_provider})
         return routes
 
+    def describe_protocols(self) -> list[dict[str, Any]]:
+        """Describe active endpoint defaults without changing the shared rule table.
+
+        Responses uses its own fallback when configured, while Images bypasses
+        model rules and requires an explicitly trusted native fallback.
+        Availability describes configuration, not upstream health.
+        """
+        responses_default = self.responses_default or self.default_provider
+        image_provider = self.responses_providers.get(self.responses_default or "")
+        return [
+            {
+                "protocol": "messages",
+                "endpoints": ["/v1/messages", "/v1/messages/count_tokens"],
+                "default_provider": self.default_provider,
+                "model_rules": True,
+                "available": True,
+            },
+            {
+                "protocol": "responses",
+                "endpoints": ["/v1/responses"],
+                "default_provider": responses_default,
+                "model_rules": True,
+                "available": responses_default in self.responses_providers,
+            },
+            {
+                "protocol": "images",
+                "endpoints": ["/v1/images/generations", "/v1/images/edits"],
+                "default_provider": self.responses_default,
+                "model_rules": False,
+                "available": image_provider is not None and image_provider.cfg.forward_client_auth,
+            },
+        ]
+
     def resolve_pricing(self, model: str) -> dict[str, Any]:
         """Return the effective prices of one model and where they come from.
 

@@ -149,7 +149,8 @@ async def dashboard_state(
 
     Returns:
         ``Monitor.snapshot()`` extended with ``version``, ``routes``
-        (``ProviderRegistry.describe_routes``), ``pricing``
+        (``ProviderRegistry.describe_routes``), ``protocols`` (the independent
+        endpoint defaults and their configured availability), ``pricing``
         (``ProviderRegistry.describe_pricing``), ``proxy`` (``proxy_info``)
         and ``history`` -- ``None`` when storage is off, else the resolved
         ``window`` (label, bounds, bucket), its ``totals``, the ``series``
@@ -169,6 +170,7 @@ async def dashboard_state(
         UNKNOWN_VERSION, state["version"],
     }
     state["routes"] = registry.describe_routes()
+    state["protocols"] = registry.describe_protocols()
     state["pricing"] = registry.describe_pricing()
     state["proxy"] = proxy_info(settings.proxy)
     state["windows"] = list(WINDOW_LABELS)
