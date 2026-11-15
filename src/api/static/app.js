@@ -1273,10 +1273,37 @@ function Routing(props) {
   const state = props.state || {};
   const routes = state.routes || [];
   const routePricing = (state.pricing && state.pricing.routes) || [];
+  const protocols = state.protocols || [];
   const proxy = state.proxy || {};
   return html`
     <details class="card routing">
       <summary>Routing</summary>
+      <p class="routing-note">Active configuration loaded at startup. Editing routing.yaml requires a router restart.</p>
+      ${protocols.length ? html`
+        <h3 class="routing-heading">Endpoint defaults</h3>
+        <div class="scroll">
+          <table class="protocols-table">
+            <thead><tr><th>API</th><th>Default provider</th><th>Selection</th></tr></thead>
+            <tbody>
+              ${protocols.map((protocol) => html`
+                <tr key=${protocol.protocol}>
+                  <td>
+                    <strong>${{ messages: "Messages", responses: "Codex Responses", images: "Codex Images" }[protocol.protocol] || protocol.protocol}</strong>
+                    <div class="routing-endpoints mono muted">${protocol.endpoints.join(" · ")}</div>
+                  </td>
+                  <td class="mono">${protocol.default_provider || "Not configured"}</td>
+                  <td>
+                    ${protocol.model_rules ? "First matching model rule, otherwise this default" : "Authenticated native default only; bypasses model rules"}
+                    ${!protocol.available ? html`<div class="warn">Default unavailable for this API</div>` : null}
+                  </td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        </div>
+        <h3 class="routing-heading">Model rules</h3>
+        <p class="routing-note">Checked in order for Messages and Responses. A matched provider must support the requested API.</p>
+      ` : null}
       ${routes.length
         ? html`
             <div class="scroll">
@@ -1291,6 +1318,7 @@ function Routing(props) {
                 </thead>
                 <tbody>
                   ${routes.map((route, index) => {
+                    if (protocols.length && route.match_type === "default") return null;
                     const pricing = routePricing[index] || {};
                     return html`
                       <tr key=${String(index)}>
@@ -1299,7 +1327,7 @@ function Routing(props) {
                           <span class="mono"> ${route.match_value || ""}</span>
                         </td>
                         <td class="mono">${route.provider}</td>
-                        <td class="mono muted">${route.upstream_model || ""}</td>
+                        <td class="mono muted">${route.upstream_model || "Requested model"}</td>
                         <td class="num">${pricesCell(pricing.pricing, pricing.pricing_source)}</td>
                       </tr>
                     `;
@@ -1310,7 +1338,7 @@ function Routing(props) {
           `
         : html`<div class="empty">No routes.</div>`}
       <p class="proxy-line">
-        forward proxy
+        forward proxy${" "}
         <b>${proxy.enabled ? proxy.host + ":" + proxy.port : "off"}</b>
         ${proxy.mitm_hosts && proxy.mitm_hosts.length
           ? html` · MITM <b>${proxy.mitm_hosts.join(", ")}</b>`

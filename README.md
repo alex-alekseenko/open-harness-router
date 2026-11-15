@@ -1323,6 +1323,13 @@ address, MITM allowlist, root CA expiry). The page polls
 `GET /dashboard/state`, which returns the same picture as JSON, so it can
 be read with `curl`/`jq` or scraped by anything else.
 
+The Routing panel separates the Messages, Codex Responses and Codex Images
+endpoint defaults from the shared model rules. Responses can use a different
+fallback from Messages; Images bypasses model rules and requires the explicitly
+authenticated native fallback. The panel shows the configuration loaded by the
+running process, not edits waiting on disk: restart the router after changing
+`routing.yaml`. Switching a client's selected model does not change these rules.
+
 The page is Preact 11.1.1 + htm 3.1.1 with Chart.js 4.6.1, vendored
 byte-for-byte under `src/api/static/vendor` -- no build step, and no CDN at
 runtime: the page loads same-origin files only, served by

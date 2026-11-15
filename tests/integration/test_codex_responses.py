@@ -136,6 +136,26 @@ async def codex_client(
             await registry.close_all()
 
 
+@pytest.mark.parametrize("codex_client", [False, True, "own-key"], indirect=True)
+async def test_dashboard_describes_independent_protocol_defaults(
+    codex_client: httpx.AsyncClient, request: pytest.FixtureRequest,
+) -> None:
+    """The dashboard reports the same native fallback and image trust policy as ingress."""
+    configured = request.node.callspec.params["codex_client"]
+    state = (await codex_client.get("/dashboard/state")).json()
+    protocols = {row["protocol"]: row for row in state["protocols"]}
+    assert protocols["messages"]["default_provider"] == "anthropic"
+    assert protocols["messages"]["model_rules"] is True
+    assert protocols["responses"]["model_rules"] is True
+    assert protocols["images"]["model_rules"] is False
+    expected = "kimi" if configured == "own-key" else "codex_openai" if configured else None
+    assert protocols["responses"]["default_provider"] == (expected or "anthropic")
+    assert protocols["responses"]["available"] is bool(configured)
+    assert protocols["images"]["default_provider"] == expected
+    assert protocols["images"]["available"] is (configured is True)
+    assert state["routes"][-1] == {"match_type": "default", "provider": "anthropic"}
+
+
 async def test_catalog_lists_only_explicit_responses_models(
     codex_client: httpx.AsyncClient,
 ) -> None:
