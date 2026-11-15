@@ -55,7 +55,10 @@ if TYPE_CHECKING:
 
 # Paths the request tracker covers itself: their ``proxy_request`` log
 # events would duplicate the tracked entries in the feed.
-_TRACKED_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens", "/v1/responses"})
+_TRACKED_PATHS = frozenset({
+    "/v1/messages", "/v1/messages/count_tokens", "/v1/responses",
+    "/v1/images/generations", "/v1/images/edits",
+})
 
 # Informational events that belong in the feed even though they are not
 # warnings: what the forward-proxy did with traffic the tracker never sees.
@@ -384,8 +387,7 @@ class RequestTracker:
             # keeps the upstream's content-encoding and is inflated for the
             # reading like a stream is.
             self._scanner = UsageScanner(_header_value(result.headers, "content-encoding") or "")
-            if self._active.endpoint in {"messages", "responses"}:
-                self._scanner.feed_json(result.body)
+            self._scanner.feed_json(result.body)
             self._finish(
                 status=result.status_code,
                 error=None,
@@ -548,7 +550,7 @@ class Monitor:
         Args:
             model: the model id the client sent.
             provider: the name of the provider the route resolved to.
-            endpoint: ``messages``, ``responses`` or ``count_tokens``.
+            endpoint: operation label, e.g. ``responses`` or ``images/generations``.
             pricing: the route's effective prices, or ``None`` for tokens only.
             stream: whether the client requested streaming, including while waiting for headers.
 

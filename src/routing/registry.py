@@ -8,7 +8,7 @@ from typing import Any
 from log import get_logger
 from providers.base import Provider
 from providers.factory import build_provider, build_responses_provider
-from providers.responses import ResponsesProvider
+from providers.openai_native import NativeOpenAIProvider
 from routing.matcher import match_model
 from routing.schema import (
     PricingCfg,
@@ -55,7 +55,7 @@ class ProviderRegistry:
         providers: dict[str, Provider],
         rules: list[RoutingRule],
         default_provider: str,
-        responses_providers: dict[str, ResponsesProvider] | None = None,
+        responses_providers: dict[str, NativeOpenAIProvider] | None = None,
         responses_default: str | None = None,
         codex_catalog: dict[str, Any] | None = None,
     ) -> None:

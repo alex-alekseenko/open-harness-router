@@ -6,9 +6,9 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Request, WebSocket
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 
-from api.adapters import to_fastapi_response
+from api.adapters import openai_error, to_fastapi_response
 from dependencies import LoggerDep, RegistryDep
 from errors import UpstreamError
 from services.codex_catalog import merge_catalogs, model_catalog
@@ -25,13 +25,6 @@ async def responses_websocket(http_request: WebSocket) -> None:
     Its built-in OpenAI provider probes WebSockets even behind a custom URL.
     """
     await http_request.send_denial_response(Response(status_code=426))
-
-
-def _error(message: str, status: int = 400, *, code: str = "invalid_request") -> JSONResponse:
-    return JSONResponse(
-        status_code=status,
-        content={"error": {"message": message, "type": code, "code": code, "param": None}},
-    )
 
 
 @router.get("/codex/models")
@@ -67,16 +60,16 @@ async def create_response(
     try:
         payload = json.loads(raw_body)
     except (ValueError, UnicodeDecodeError):
-        return _error("Invalid JSON body")
+        return openai_error("Invalid JSON body")
     model = payload.get("model") if isinstance(payload, dict) else None
     if not isinstance(model, str) or not model:
-        return _error("Missing 'model' field")
+        return openai_error("Missing 'model' field")
     if "stream" in payload and not isinstance(payload["stream"], bool):
-        return _error("'stream' must be a boolean")
+        return openai_error("'stream' must be a boolean")
     decision = registry.resolve(model, default_provider=registry.responses_default)
     native = registry.responses_providers.get(decision.provider.name)
     if native is None:
-        return _error(
+        return openai_error(
             "The selected model's provider does not support native Responses; "
             "configure responses_base_url for a Responses-capable upstream.",
             code="unsupported_model",
@@ -95,7 +88,7 @@ async def create_response(
         )
     except UpstreamError as exc:
         tracker.fail(exc)
-        return _error(exc.message, exc.status_code, code=exc.error_type)
+        return openai_error(exc.message, exc.status_code, code=exc.error_type)
     except BaseException as exc:
         tracker.fail(exc)
         raise

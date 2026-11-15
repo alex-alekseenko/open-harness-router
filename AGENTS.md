@@ -15,6 +15,10 @@ own-key custom providers must continue stripping client credentials.
 Native-auth Codex profiles keep the built-in `openai` provider identity and
 redirect it with `openai_base_url`, so ordinary saved sessions remain
 resumable. Preserve this identity when changing profile generation.
+Codex's built-in image tool uses native Images endpoints at the same base URL.
+Forward these only through the explicitly authenticated Responses fallback,
+never through custom-model routing rules or an own-key fallback. Preserve the
+native JSON body and image request headers; do not log image data or prompts.
 Custom model metadata must also carry model-specific instructions; otherwise
 Codex's GPT identity fallback produces misleading self-reports. Preserve the
 native model instructions and coding workflow when adapting custom identities.

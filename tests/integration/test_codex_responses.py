@@ -116,6 +116,8 @@ async def codex_client(
             "forward_client_auth": True,
             "responses_forward_client_auth": True,
         }
+        if request.param == "own-key":
+            config["responses_default"] = {"provider": "kimi"}
     path = tmp_path / "routing.yaml"
     path.write_text(yaml.safe_dump(config))
     monkeypatch.setenv("ROUTER_CONFIG_PATH", str(path))
@@ -467,3 +469,92 @@ async def test_exec_custom_tool_round_trip_and_replay(
     assert result["output"][0]["type"] == "custom_tool_call"
     assert result["output"][0]["input"] == code
     assert result["output"][0]["call_id"] == "call_next"
+
+
+@pytest.mark.parametrize("codex_client", [True], indirect=True)
+@pytest.mark.parametrize("operation", ["generations", "edits"])
+@pytest.mark.parametrize("model", ["gpt-image-2", "kimi-for-coding"])
+async def test_native_images_preserve_json_auth_and_never_follow_custom_model_rules(
+    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock, operation: str, model: str,
+) -> None:
+    response_body = {"created": 1, "data": [{"b64_json": "aW1hZ2U="}],
+                     "usage": {"input_tokens": 12, "output_tokens": 8}}
+    url = f"https://chatgpt.com/backend-api/codex/images/{operation}?test=true"
+    httpx_mock.add_response(url=url, json=response_body,
+                            headers={"x-codex-imagegen-request-id": "image-request-1"})
+    payload = {"model": model, "prompt": "samurai mask — ёжик", "background": "transparent"}
+    if operation == "edits":
+        payload["images"] = [{"image_url": "data:image/png;base64,aW1hZ2U="}]
+    raw = json.dumps(payload, indent=2, ensure_ascii=False).encode()
+    response = await codex_client.post(
+        f"/v1/images/{operation}?test=true", content=raw,
+        headers={"authorization": "Bearer native-client-token", "content-type": "application/json",
+                 "x-codex-image-turn-id": "turn-image-1"},
+    )
+    assert response.status_code == 200
+    assert response.json() == response_body
+    assert response.headers["x-codex-imagegen-request-id"] == "image-request-1"
+    forwarded = httpx_mock.get_request()
+    assert forwarded is not None and forwarded.content == raw
+    assert forwarded.headers["authorization"] == "Bearer native-client-token"
+    assert forwarded.headers["x-codex-image-turn-id"] == "turn-image-1"
+    event = Monitor.current().snapshot()["events"][0]
+    assert event["provider"] == "codex_openai"
+    assert event["endpoint"] == f"images/{operation}"
+    assert event["usage"]["output_tokens"] == 8
+    assert "ttft_ms" not in event and "cost_usd" not in event
+
+
+@pytest.mark.parametrize("codex_client", [False, "own-key"], indirect=True)
+@pytest.mark.parametrize("operation", ["generations", "edits"])
+async def test_images_require_an_explicit_authenticated_native_fallback(
+    codex_client: httpx.AsyncClient, operation: str,
+) -> None:
+    response = await codex_client.post(f"/v1/images/{operation}",
+                                       json={"model": "gpt-image-2", "prompt": "test"},
+                                       headers={"authorization": "Bearer private-client-token"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_image_provider"
+    assert Monitor.current().snapshot()["active"] == []
+
+
+@pytest.mark.parametrize("codex_client", [True], indirect=True)
+@pytest.mark.parametrize("operation", ["generations", "edits"])
+@pytest.mark.parametrize("payload", [None, [], {}, {"model": ""},
+                                     {"model": "gpt-image-2", "stream": "false"}])
+async def test_invalid_image_requests_do_not_reach_upstream(
+    codex_client: httpx.AsyncClient, operation: str, payload: object,
+) -> None:
+    response = await codex_client.post(f"/v1/images/{operation}", content=json.dumps(payload))
+    assert response.status_code == 400
+    assert response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("codex_client", [True], indirect=True)
+@pytest.mark.parametrize("operation", ["generations", "edits"])
+@pytest.mark.parametrize("status", [401, 429, 500])
+async def test_native_image_upstream_errors_are_relayed(
+    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock, operation: str, status: int,
+) -> None:
+    error = {"error": {"message": "upstream image error", "type": "api_error"}}
+    httpx_mock.add_response(url=f"https://chatgpt.com/backend-api/codex/images/{operation}",
+                            status_code=status, json=error, headers={"retry-after": "5"})
+    response = await codex_client.post(f"/v1/images/{operation}",
+                                       json={"model": "gpt-image-2", "prompt": "test"})
+    assert response.status_code == status
+    assert response.json() == error
+    assert response.headers["retry-after"] == "5"
+
+
+@pytest.mark.parametrize("codex_client", [True], indirect=True)
+async def test_native_image_transport_failure_finishes_the_tracker(
+    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_exception(httpx.ReadTimeout("synthetic timeout"),
+                             url="https://chatgpt.com/backend-api/codex/images/generations")
+    response = await codex_client.post("/v1/images/generations",
+                                       json={"model": "gpt-image-2", "prompt": "test"})
+    assert response.status_code == 504
+    snapshot = Monitor.current().snapshot()
+    assert snapshot["active"] == []
+    assert snapshot["totals"]["errors"] == 1

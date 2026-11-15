@@ -1,9 +1,10 @@
-"""Native Responses forwarding, sharing the passthrough transport and cleanup."""
+"""Native OpenAI forwarding, sharing the passthrough transport and cleanup."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Mapping
+from typing import Literal
 
 from const import UPSTREAM_STREAM_INTERRUPTED_MESSAGE
 from conversion.responses_tools import CustomToolsAdapter
@@ -12,13 +13,28 @@ from providers.base import ClientChannel, ProviderResult
 from providers.passthrough import PassthroughProvider
 
 
-class ResponsesProvider(PassthroughProvider):
-    """Forward Responses bodies and SSE without translating reasoning or tools.
+class NativeOpenAIProvider(PassthroughProvider):
+    """Forward native Responses and Images through the same upstream transport.
 
     The factory disables Anthropic tool folding. Own-key providers inject
     Bearer authentication; the explicitly configured native fallback can
     preserve the client's own OpenAI credentials.
     """
+
+    async def handle_images(
+        self,
+        operation: Literal["generations", "edits"],
+        raw_body: bytes,
+        client_headers: Mapping[str, str],
+        client_channel: ClientChannel,
+        *,
+        query: str = "",
+    ) -> ProviderResult:
+        """Forward native Images JSON without applying Responses tool adaptation."""
+        path = f"images/{operation}"
+        if query:
+            path += f"?{query}"
+        return await self._proxy(path, raw_body, client_headers, client_channel)
 
     async def handle_responses(
         self,

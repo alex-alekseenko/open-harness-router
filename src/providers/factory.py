@@ -9,9 +9,9 @@ from pydantic import SecretStr
 
 from errors import ConfigError
 from providers.base import Provider
+from providers.openai_native import NativeOpenAIProvider
 from providers.openai_translate import OpenAITranslateProvider
 from providers.passthrough import PassthroughProvider
-from providers.responses import ResponsesProvider
 from routing.schema import ProviderCfg
 from settings import Settings
 
@@ -107,7 +107,7 @@ def build_provider(name: str, cfg: ProviderCfg, settings: Settings) -> Provider:
 
 def build_responses_provider(
     name: str, cfg: ProviderCfg, settings: Settings
-) -> ResponsesProvider | None:
+) -> NativeOpenAIProvider | None:
     """Build a native Responses transport only for an explicitly capable upstream.
 
     Responses-flavor OpenAI providers already declare this capability. Other
@@ -131,7 +131,7 @@ def build_responses_provider(
         extra_headers=cfg.extra_headers,
         responses_custom_tools_as_functions=cfg.responses_custom_tools_as_functions,
     )
-    return ResponsesProvider(
+    return NativeOpenAIProvider(
         name,
         transport_cfg,
         settings.upstream,
