@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.5.0] - 2026-11-15
+
+### Added
+
+- connect Codex CLI through native `POST /v1/responses` and HTTP streaming, using the shared routing rules with an independent `responses_default`; merge the account catalog and explicitly configured custom models in one picker through `GET /codex/models`, `GET /v1/models` and `cli.sync_codex_config`, preserving native capabilities and visibility, custom model identity instructions, and the built-in `openai` provider identity for saved-session resume; forward native client credentials only by explicit opt-in while own-key providers strip them, and record Responses usage without double-counting cached input ([#40](https://github.com/kskadart/open-harness-router/pull/40))
+- adapt selected freeform Responses tools such as Codex Code Mode `exec` to JSON function tools for compatible upstreams, restoring custom calls in JSON/SSE responses and replayed history while leaving execution in Codex; decline WebSocket probes with HTTP 426 for immediate HTTP fallback, using the pinned Uvicorn version's `websockets` backend to avoid its SansIO denial-handshake error ([#40](https://github.com/kskadart/open-harness-router/pull/40))
+- document Codex setup, model capabilities and transport boundaries, add a dedicated `make sync-codex-config` helper, and add project `AGENTS.md` guidance for architecture, verification and credential handling ([#40](https://github.com/kskadart/open-harness-router/pull/40))
+
 ## [0.4.0] - 2026-11-01
 
 ### Added
