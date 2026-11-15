@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
 # Paths the request tracker covers itself: their ``proxy_request`` log
 # events would duplicate the tracked entries in the feed.
-_TRACKED_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens"})
+_TRACKED_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens", "/v1/responses"})
 
 # Informational events that belong in the feed even though they are not
 # warnings: what the forward-proxy did with traffic the tracker never sees.
@@ -213,6 +213,8 @@ class UsageScanner:
         """
         self.usage = Usage()
         self.first_delta_monotonic: float | None = None
+        self.response_finished = False
+        self.stream_failed = False
         self._pending = b""
         encoding = content_encoding.strip().lower()
         self._inflater = _Inflater() if encoding in _ZLIB_ENCODINGS else None
@@ -255,9 +257,14 @@ class UsageScanner:
         if not isinstance(payload, dict):
             return
         event_type = payload.get("type")
+        if event_type in {"message_stop", "response.completed", "response.incomplete"}:
+            self.response_finished = True
+        elif event_type in {"error", "response.failed"}:
+            self.stream_failed = True
         if event_type in {
             "content_block_delta", "response.output_text.delta",
             "response.function_call_arguments.delta", "response.reasoning_summary_text.delta",
+            "response.custom_tool_call_input.delta", "response.reasoning_text.delta",
         }:
             # The first content token of the answer: the start of the
             # generation window the throughput is measured over. A keepalive
@@ -377,7 +384,7 @@ class RequestTracker:
             # keeps the upstream's content-encoding and is inflated for the
             # reading like a stream is.
             self._scanner = UsageScanner(_header_value(result.headers, "content-encoding") or "")
-            if self._active.endpoint == "messages":
+            if self._active.endpoint in {"messages", "responses"}:
                 self._scanner.feed_json(result.body)
             self._finish(
                 status=result.status_code,
@@ -433,6 +440,16 @@ class RequestTracker:
         if self._done:
             return
         self._done = True
+        scanner = self._scanner
+        if scanner is not None:
+            if scanner.stream_failed:
+                error = error or "UpstreamStreamError"
+            elif scanner.response_finished and error in {
+                "CancelledError", "GeneratorExit", _STREAM_NOT_STARTED,
+            }:
+                # Codex closes HTTP after the terminal SSE event; cancellation
+                # of the remaining transport cleanup is not an inference error.
+                error = None
         usage = self._scanner.usage if self._scanner is not None else Usage()
         cost = (
             self._pricing.cost_usd(
@@ -457,14 +474,14 @@ class RequestTracker:
     def _ttft_ms(self) -> float | None:
         """Return the time to the first content token, in milliseconds.
 
-        Only a streamed ``/v1/messages`` answer has one: a unary body and a
+        A streamed Messages or Responses answer has one: a unary body and a
         ``count_tokens`` request never carry a token, so their throughput is
         not defined and the timing stays unknown.
         """
         scanner = self._scanner
         if scanner is None or scanner.first_delta_monotonic is None:
             return None
-        if self._active.endpoint != "messages":
+        if self._active.endpoint not in {"messages", "responses"}:
             return None
         return (scanner.first_delta_monotonic - self._active.started_monotonic) * 1000.0
 
@@ -523,15 +540,17 @@ class Monitor:
         return cls._current
 
     def start_request(
-        self, *, model: str, provider: str, endpoint: str, pricing: PricingCfg | None
+        self, *, model: str, provider: str, endpoint: str, pricing: PricingCfg | None,
+        stream: bool = False,
     ) -> RequestTracker:
         """Register a routed request as in flight.
 
         Args:
             model: the model id the client sent.
             provider: the name of the provider the route resolved to.
-            endpoint: ``messages`` or ``count_tokens``.
+            endpoint: ``messages``, ``responses`` or ``count_tokens``.
             pricing: the route's effective prices, or ``None`` for tokens only.
+            stream: whether the client requested streaming, including while waiting for headers.
 
         Returns:
             The tracker the handler finishes the request through.
@@ -543,6 +562,7 @@ class Monitor:
             endpoint=endpoint,
             started_monotonic=time.monotonic(),
             started_at=_now_iso(),
+            stream=stream,
         )
         self._next_id += 1
         self._active[active.request_id] = active

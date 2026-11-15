@@ -1429,7 +1429,7 @@ only in memory, while the rolling window is read back from disk.
   token to the last response byte -- and deliberately not over the whole
   request: the prompt processing of a two-million-token prompt would
   dominate the total duration and understate the generation speed badly.
-  Only a streamed `/v1/messages` answer qualifies (a unary answer has no
+  Streamed `/v1/messages` and `/v1/responses` answers qualify (a unary answer has no
   token to time), and only when its generation window is at least 250 ms --
   a gateway that buffers the stream delivers every token in one burst at the
   end, which would read as tens of thousands of tok/s. Every figure is
@@ -1439,6 +1439,16 @@ only in memory, while the rolling window is read back from disk.
   to the first token (TTFT). Rows recorded before this measurement existed
   carry no first-token timing and therefore do not appear in the chart at
   all.
+- **Version and live streams**: `pyproject.toml` is the single version source
+  updated by the release helper. The header and metrics report the version
+  captured when the service starts. When the checkout version changes, the
+  header shows that a restart is required; publishing a release does not
+  automatically replace a running process. "In flight" counts active requests
+  right now, including Codex streams waiting for upstream headers, and returns
+  to zero when they finish. TPS appears after a measured stream completes.
+  Closing a stream after its terminal event is normal client cleanup; closing
+  it before that event still counts as an error. Existing historical rows
+  without timing cannot be backfilled into TPS, and old error records are kept.
 - **Failures never break a request**: if the database cannot be opened,
   written or read (read-only or full disk, corrupt file, a busy lock) the
   error is logged and carried into the window snapshot as `storage_error`;

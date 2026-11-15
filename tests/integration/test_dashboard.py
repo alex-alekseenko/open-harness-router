@@ -19,6 +19,7 @@ from pytest_httpx import HTTPXMock
 import api.dashboard as dashboard_module
 from services.monitor import Monitor
 from services.request_store import RequestStore
+from version import project_version
 
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _PAYLOAD = {
@@ -46,6 +47,8 @@ async def test_dashboard_state_starts_empty_with_routes_and_proxy_facts(
     assert state["totals"]["requests"] == 0
     assert state["active"] == []
     assert state["version"]
+    assert state["checkout_version"] == project_version()
+    assert state["restart_required"] is False
     assert state["routes"][-1] == {"match_type": "default", "provider": "anthropic"}
     pricing = state["pricing"]
     assert pricing["unit"] == "USD per 1M tokens"
@@ -131,8 +134,9 @@ async def test_dashboard_state_serves_a_persisted_window(
         await store.aclose()
 
 
+@pytest.mark.parametrize("endpoint", ["messages", "responses"])
 async def test_dashboard_state_serves_the_throughput_figures(
-    client: httpx.AsyncClient, tmp_path: Path
+    client: httpx.AsyncClient, tmp_path: Path, endpoint: str,
 ) -> None:
     """The window carries the generation throughput of every model."""
     store = RequestStore(db_path=tmp_path / "m.db", retention_days=365, window_days=30)
@@ -142,7 +146,7 @@ async def test_dashboard_state_serves_the_throughput_figures(
             "ts": datetime.now(UTC).isoformat(),
             "kind": "request",
             "status": 200,
-            "endpoint": "messages",
+            "endpoint": endpoint,
             "stream": 1,
             "provider": "anthropic",
             "model": "claude-opus-4-8",
@@ -176,6 +180,25 @@ async def test_dashboard_state_serves_the_throughput_figures(
     finally:
         Monitor.current().attach_store(None)
         await store.aclose()
+
+
+async def test_dashboard_detects_a_release_bump_without_relabelling_running_code(
+    client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    running = (await client.get("/dashboard/state")).json()["version"]
+    project = tmp_path / "pyproject.toml"
+    project.write_text(f'[project]\nversion = "{running}"\n')
+    monkeypatch.setattr(dashboard_module, "project_version", lambda: project_version(project))
+    assert (await client.get("/dashboard/state")).json()["restart_required"] is False
+    project.write_text('[project]\nversion = "9.8.7"\n')
+    state = (await client.get("/dashboard/state")).json()
+    assert state["version"] == running
+    assert state["checkout_version"] == "9.8.7"
+    assert state["restart_required"] is True
+    metrics = (await client.get("/metrics")).text
+    assert f'ohr_info{{version="{running}"}} 1' in metrics
+    project.unlink()
+    assert (await client.get("/dashboard/state")).json()["restart_required"] is False
 
 
 async def test_dashboard_state_serves_the_breakdown_and_the_data_since(

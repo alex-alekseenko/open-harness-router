@@ -86,7 +86,8 @@ async def create_response(
         raw_body = json.dumps(payload).encode()
     logger.info("route", endpoint="responses", model=model, provider=native.name)
     tracker = Monitor.current().start_request(
-        model=model, provider=native.name, endpoint="responses", pricing=decision.pricing
+        model=model, provider=native.name, endpoint="responses", pricing=decision.pricing,
+        stream=payload.get("stream", False),
     )
     try:
         result = await native.handle_responses(

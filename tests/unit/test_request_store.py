@@ -469,13 +469,17 @@ async def test_breakdown_keeps_a_row_without_a_provider_or_model(store: RequestS
     assert rows[0]["requests"] == 1
 
 
-async def test_breakdown_weights_the_throughput_by_tokens(store: RequestStore) -> None:
+@pytest.mark.parametrize("endpoint", ["messages", "responses"])
+async def test_breakdown_weights_the_throughput_by_tokens(
+    store: RequestStore, endpoint: str,
+) -> None:
     """The group's TPS is the sum of the tokens over the sum of the windows."""
     # 100 tokens in 1 s (100 tok/s) and 100 tokens in 9 s (11.1 tok/s).
     store.record(
         _streamed(
             _iso(),
             model="m",
+            endpoint=endpoint,
             output_tokens=100,
             duration_ms=1100.0,
             ttft_ms=100.0,
@@ -485,6 +489,7 @@ async def test_breakdown_weights_the_throughput_by_tokens(store: RequestStore) -
         _streamed(
             _iso(),
             model="m",
+            endpoint=endpoint,
             output_tokens=100,
             duration_ms=9200.0,
             ttft_ms=200.0,
@@ -588,11 +593,16 @@ async def test_range_series_can_bucket_by_hour(store: RequestStore) -> None:
     assert series[0]["usage"]["input_tokens"] == 3
 
 
-async def test_tps_is_token_weighted_and_not_the_mean_of_the_ratios(store: RequestStore) -> None:
+@pytest.mark.parametrize("endpoint", ["messages", "responses"])
+async def test_tps_is_token_weighted_and_not_the_mean_of_the_ratios(
+    store: RequestStore, endpoint: str,
+) -> None:
     """The sum of the tokens over the sum of the generation windows."""
     # 100 tokens in 1 s (100 tok/s) and 100 tokens in 9 s (11.1 tok/s).
-    store.record(_streamed(_iso(), output_tokens=100, duration_ms=1100.0, ttft_ms=100.0))
-    store.record(_streamed(_iso(), output_tokens=100, duration_ms=9200.0, ttft_ms=200.0))
+    store.record(_streamed(_iso(), endpoint=endpoint, output_tokens=100,
+                           duration_ms=1100.0, ttft_ms=100.0))
+    store.record(_streamed(_iso(), endpoint=endpoint, output_tokens=100,
+                           duration_ms=9200.0, ttft_ms=200.0))
 
     result = await store.tps(start=_iso(1), end=None, bucket="hour")
 

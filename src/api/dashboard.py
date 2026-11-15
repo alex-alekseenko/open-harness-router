@@ -23,6 +23,7 @@ from dependencies import RegistryDep, SettingsDep
 from services.monitor import Monitor
 from services.request_store import WINDOW_LABELS, resolve_window
 from settings import ProxySettings, Settings
+from version import UNKNOWN_VERSION, project_version
 
 if TYPE_CHECKING:
     from routing.registry import ProviderRegistry
@@ -160,6 +161,10 @@ async def dashboard_state(
     """
     state = Monitor.current().snapshot()
     state["version"] = request.app.version
+    state["checkout_version"] = project_version()
+    state["restart_required"] = state["checkout_version"] not in {
+        UNKNOWN_VERSION, state["version"],
+    }
     state["routes"] = registry.describe_routes()
     state["pricing"] = registry.describe_pricing()
     state["proxy"] = proxy_info(settings.proxy)

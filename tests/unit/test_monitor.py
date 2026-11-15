@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 import zlib
@@ -336,6 +337,110 @@ def test_a_unary_result_records_no_first_token_timing() -> None:
     tracker = monitor.start_request(model="m", provider="p", endpoint="messages", pricing=None)
     tracker.attach(ProviderResult(200, _JSON_HEADERS, b'{"usage": {"output_tokens": 9}}'))
     assert "ttft_ms" not in monitor.snapshot()["events"][0]
+
+
+@pytest.mark.parametrize("delta", [
+    "response.output_text.delta", "response.function_call_arguments.delta",
+    "response.custom_tool_call_input.delta", "response.reasoning_summary_text.delta",
+    "response.reasoning_text.delta",
+])
+async def test_responses_stream_records_first_token_usage_and_live_state(
+    monkeypatch: pytest.MonkeyPatch, delta: str,
+) -> None:
+    clock = _Clock()
+    monkeypatch.setattr("services.monitor.time.monotonic", clock)
+    monitor = Monitor()
+    tracker = monitor.start_request(
+        model="codex-model", provider="p", endpoint="responses", pricing=None, stream=True,
+    )
+    assert monitor.snapshot()["active"][0]["stream"] is True
+
+    async def upstream() -> AsyncIterator[bytes]:
+        clock.advance(0.5)
+        yield _sse("response.created", {"type": "response.created"})
+        clock.advance(0.5)
+        yield _sse(delta, {"type": delta, "delta": "first token"})
+        clock.advance(1)
+        yield _sse("response.completed", {"type": "response.completed", "response": {
+            "usage": {"input_tokens": 50, "input_tokens_details": {"cached_tokens": 10},
+                      "output_tokens": 20},
+        }})
+
+    result = tracker.attach(ProviderResult(200, _SSE_HEADERS, upstream()))
+    async for _chunk in result.body:
+        assert monitor.snapshot()["active"][0]["stream"] is True
+    event = monitor.snapshot()["events"][0]
+    assert monitor.snapshot()["active"] == []
+    assert event["ttft_ms"] == 1000.0
+    assert event["duration_ms"] == 2000.0
+    assert event["usage"]["output_tokens"] == 20
+    assert event["usage"]["input_tokens"] == 40
+    assert event["usage"]["cache_read_input_tokens"] == 10
+
+
+def test_responses_unary_usage_is_recorded_without_a_generation_timing() -> None:
+    monitor = Monitor()
+    tracker = monitor.start_request(model="m", provider="p", endpoint="responses", pricing=None)
+    tracker.attach(ProviderResult(200, _JSON_HEADERS, b'{"usage":{"output_tokens":17}}'))
+    event = monitor.snapshot()["events"][0]
+    assert event["usage"]["output_tokens"] == 17
+    assert "ttft_ms" not in event
+
+
+@pytest.mark.parametrize("endpoint,terminal", [
+    ("messages", "message_stop"), ("responses", "response.completed"),
+    ("responses", "response.incomplete"),
+])
+@pytest.mark.parametrize("finished", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_client_close_is_an_error_only_before_the_terminal_event(
+    endpoint: str, terminal: str, finished: bool, cancel: bool,
+) -> None:
+    monitor = Monitor()
+    tracker = monitor.start_request(model="m", provider="p", endpoint=endpoint, pricing=None)
+    closed = False
+
+    async def upstream() -> AsyncIterator[bytes]:
+        nonlocal closed
+        try:
+            yield _sse("delta", {"type": "response.output_text.delta", "delta": "hi"})
+            if finished:
+                yield _sse(terminal, {"type": terminal})
+            yield b": trailing transport bytes\n\n"
+        finally:
+            closed = True
+
+    result = tracker.attach(ProviderResult(200, _SSE_HEADERS, upstream()))
+    assert not isinstance(result.body, bytes)
+    await anext(result.body)
+    if finished:
+        await anext(result.body)
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await result.body.athrow(asyncio.CancelledError())
+    else:
+        await result.body.aclose()
+    await result.aclose()
+    snapshot = monitor.snapshot()
+    assert closed
+    assert snapshot["active"] == []
+    assert snapshot["totals"]["requests"] == 1
+    assert snapshot["totals"]["errors"] == (0 if finished else 1)
+
+
+@pytest.mark.parametrize("event_type", ["error", "response.failed"])
+async def test_in_band_stream_failure_counts_as_an_error(event_type: str) -> None:
+    monitor = Monitor()
+    tracker = monitor.start_request(model="m", provider="p", endpoint="responses", pricing=None)
+
+    async def upstream() -> AsyncIterator[bytes]:
+        yield _sse(event_type, {"type": event_type})
+
+    result = tracker.attach(ProviderResult(200, _SSE_HEADERS, upstream()))
+    async for _chunk in result.body:
+        pass
+    assert monitor.snapshot()["totals"]["errors"] == 1
+    assert monitor.snapshot()["events"][0]["error"] == "UpstreamStreamError"
 
 
 def test_a_count_tokens_request_records_no_first_token_timing() -> None:

@@ -3,7 +3,9 @@
 ``pyproject.toml`` is the single place the release tooling bumps
 (``cli.release bump``), so the running application reads its version from
 there instead of repeating it in code -- ``/dashboard``, ``/dashboard/state``
-and ``ohr_info{version}`` on ``/metrics`` all show what was released. The
+and ``ohr_info{version}`` on ``/metrics`` share the version captured at
+application startup. A release bump updates the checkout, not an already
+running process; the dashboard reports that mismatch until restart. The
 project is not installed as a package (``[tool.uv] package = false``), so
 ``importlib.metadata`` cannot answer; the file sits one level above ``src``.
 """
