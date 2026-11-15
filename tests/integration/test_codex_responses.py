@@ -428,6 +428,14 @@ async def test_exec_custom_tool_round_trip_and_replay(
                     "input": "patch",
                 },
                 {"type": "custom_tool_call_output", "call_id": "patch_1", "output": "patched"},
+                {
+                    "type": "additional_tools", "id": "tools_from_previous_model",
+                    "role": "developer",
+                    "tools": [{"type": "namespace", "name": "functions", "tools": [
+                        {"type": "custom", "name": "exec", "format": {"type": "text"}},
+                        {"type": "custom", "name": "apply_patch"},
+                    ]}],
+                },
             ],
             "tool_choice": {"type": "custom", "name": "exec"},
         },
@@ -442,6 +450,8 @@ async def test_exec_custom_tool_round_trip_and_replay(
     assert json.loads(sent["input"][0]["arguments"]) == {"input": "old_code()"}
     assert sent["input"][1]["type"] == "function_call_output"
     assert sent["input"][3]["type"] == "custom_tool_call_output"
+    # Both historical definitions are already present at request level.
+    assert len(sent["input"]) == 4
     assert sent["tool_choice"]["type"] == "function"
     assert request.headers["accept-encoding"] == "identity"
     if stream:

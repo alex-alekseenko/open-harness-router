@@ -199,6 +199,11 @@ For upstreams that only support `apply_patch` as a freeform custom tool,
 `responses_custom_tools_as_functions: [exec]` adapts Codex Code Mode's `exec`
 to a JSON function tool. The router converts replayed calls and results and
 restores custom tool calls in JSON/SSE responses. Codex still executes the tool.
+Definitions inside namespaces and replayed `additional_tools` items are
+adapted too. For these configured upstreams, current request-level definitions
+take precedence over duplicate historical definitions, followed by the latest
+historical definition; redundant declarations and empty wrappers are removed
+without removing conversation messages, tool calls or results.
 Other tools and providers retain their native format. Tool arguments are
 decoded after the complete function arguments arrive. The example label is
 the Kimi API's reported K2.8 Preview model behind `kimi-for-coding`; check the
