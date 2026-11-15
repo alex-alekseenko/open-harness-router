@@ -34,7 +34,11 @@ class NativeOpenAIProvider(PassthroughProvider):
         path = f"images/{operation}"
         if query:
             path += f"?{query}"
-        return await self._proxy(path, raw_body, client_headers, client_channel)
+        # Codex's Images client parses the transport body as JSON. Negotiate
+        # identity explicitly instead of httpx injecting its gzip defaults.
+        headers = {k: v for k, v in client_headers.items() if k.lower() != "accept-encoding"}
+        headers["accept-encoding"] = "identity"
+        return await self._proxy(path, raw_body, headers, client_channel)
 
     async def handle_responses(
         self,
