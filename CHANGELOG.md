@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.5.1] - 2026-11-15
+
+### Fixed
+
+- continue Codex conversations across OpenAI/Kimi model switches by adapting namespaced and historical `additional_tools` custom definitions; current request declarations and then the latest historical declaration take precedence over duplicates, preserving messages, tool calls, results and their order ([#42](https://github.com/kskadart/open-harness-router/pull/42))
+- include native Responses streams in dashboard TPS and TTFT, display requested streams while awaiting headers, and read unary Responses usage; stop counting client cleanup after terminal SSE events as inference errors while retaining early cancellations and in-band failures; show a restart-required indicator when the running version differs from the release-bumped `pyproject.toml` checkout version, without relabelling an old process or rewriting historical statistics ([#43](https://github.com/kskadart/open-harness-router/pull/43))
+
 ## [0.5.0] - 2026-11-15
 
 ### Added
