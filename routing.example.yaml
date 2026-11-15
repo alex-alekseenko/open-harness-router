@@ -117,8 +117,9 @@ providers:
   #   # https://platform.kimi.ai/docs/api/models-overview
   #   drop_params: [temperature, top_p]
   #   # max_tokens is deprecated for Kimi in favor of max_completion_tokens.
-  #   # api_flavor is not set -> defaults to the "chat" schema: Kimi has no
-  #   # Responses-style endpoint, only /v1/chat/completions.
+  #   # api_flavor is not set -> defaults to the "chat" schema. To enable
+  #   # native Codex ingress, configure a documented responses_base_url.
+  #   # The remaining settings below apply to Messages translation.
   #   # https://platform.kimi.ai/docs/api/chat
   #   token_param: max_completion_tokens
   #   # kimi-k3 keeps thinking enabled at all times (like the GLM/GPT-5.x
@@ -180,6 +181,19 @@ providers:
   #   # exception to byte-for-byte forwarding; a body with nothing to fold
   #   # goes out untouched. Default false.
   #   fold_tool_additions: true
+
+  # Kimi Code subscription, shared by Claude Code and Codex. Pick this OR
+  # the other kimi providers above for the "kimi-" rule, not all of them.
+  # Native Responses: https://www.kimi.com/code/docs/en/third-party-tools/codex.html
+  # kimi_code:
+  #   type: passthrough
+  #   base_url: https://api.kimi.com/coding/
+  #   responses_base_url: https://api.kimi.com/coding/v1
+  #   responses_custom_tools_as_functions: [exec]
+  #   forward_client_auth: false
+  #   api_key_env: KIMI_API_KEY
+  #   auth_header: x-api-key
+  #   stream_read_timeout_s: 600
 
   # MiniMax via passthrough: MiniMax exposes an Anthropic-compatible
   # endpoint, so no translation is needed (same code path as kimi_anthropic
@@ -311,6 +325,22 @@ providers:
   #   # guard. See README, "Context window and token counting".
   #   # context_window: <N>
 
+  # Optional native Codex fallback: keep subscription models together with
+  # custom models in one picker. No rule is needed for the native model ids.
+  # For API-key login, use https://api.openai.com/v1 for both URLs instead.
+  # codex_openai:
+  #   type: passthrough
+  #   base_url: https://chatgpt.com/backend-api/codex
+  #   responses_base_url: https://chatgpt.com/backend-api/codex
+  #   forward_client_auth: true
+  #   responses_forward_client_auth: true
+
+# Optional, top-level: combine the native account catalog with custom rules.
+# Run normal Codex once to populate models_cache.json before enabling this.
+# responses_default:
+#   provider: codex_openai
+# codex_catalog_path: ~/.codex/models_cache.json
+
 # Rules: top to bottom, first match wins.
 #
 # client_models (optional) lists the exact model ids a client may send for a
@@ -357,6 +387,18 @@ rules:
   # - match: {type: prefix, value: "kimi-"}
   #   provider: kimi_anthropic
   #   client_models: ["kimi-k2.5"]
+  # Or use the shared Kimi Code provider above. codex.context_window is
+  # client metadata, separate from the Messages translation pre-flight.
+  # Capabilities/window: https://www.kimi.com/code/docs/en/third-party-tools/codex.html
+  # - match: {type: prefix, value: "kimi-"}
+  #   provider: kimi_code
+  #   client_models: ["kimi-for-coding"]
+  #   codex:
+  #     display_name: Kimi K2.8 Preview (kimi-for-coding)
+  #     context_window: 1048576
+  #     reasoning_efforts: [low, high, max]
+  #     default_reasoning_effort: high
+  #     input_modalities: [text, image]
   # MiniMax: exact ids, case-sensitive (the id is the model on passthrough,
   # there is no upstream_model). Uncomment together with the "minimax" block.
   # https://platform.minimax.io/docs/faq/models.md

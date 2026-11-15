@@ -49,6 +49,18 @@ cp .env.example .env                    # no required key to start, see below
 cp routing.example.yaml routing.yaml    # personal provider registry, not committed to the repo
 ```
 
+## Codex support
+
+The router also supports Codex CLI through native `POST /v1/responses`, with
+`GET /codex/models` for its model catalog and `GET /v1/models` for OpenAI-style
+discovery. Kimi Code supports this protocol with the same server-side key.
+Configure `responses_default` and `codex_catalog_path` to keep all native
+Codex models and custom models together in the same picker.
+The combined native-auth profile preserves the `openai` provider identity
+using `openai_base_url`, so existing OpenAI sessions can be resumed through it.
+See [Connecting Codex](README.md#connecting-codex) for configuration, model
+capabilities and the dedicated `codex -p open-harness-router` profile.
+
 ## Режимы работы
 
 Оба входа делят реестр провайдеров и одинаково маршрутизируют кастомные модели.
@@ -104,10 +116,11 @@ invalid_request_error` без обращения к апстриму, и CLI п�
 
 ### Reverse-proxy
 
-`make run`. Клиент задаёт `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`, сертификат
-не нужен. На 8787 роутер отдаёт `/health`, `/v1/messages` и
-`/v1/messages/count_tokens`, на любой другой путь отвечает 404. Эндпоинта
-`/v1/models` нет, пикер моделей собирает `make sync-client-config`.
+`make run`: Claude Code uses `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` without
+a certificate. The listener serves the Messages endpoints, `/health`, the
+dashboard and metrics, plus `/v1/responses`, `/v1/models` and `/codex/models`.
+Claude Code's picker still uses `make sync-client-config`; Codex uses the
+separate profile described above.
 
 Это обычный HTTP-интерфейс роутера: любой клиент, который знает только базовый
 URL (скрипты на Anthropic SDK, другие агентские фреймворки, плагины IDE),
@@ -1004,9 +1017,10 @@ Anthropic по подписке), субагенты работают на мо�
 
 ### Пикер моделей и клиентские настройки
 
-Пикер `/model` сам модели роутера не находит: обнаружение моделей у шлюза
-оставляет только идентификаторы со словом `claude` или `anthropic`, да и
-эндпоинта `/v1/models` роутер не отдаёт. Произвольные идентификаторы
+Claude Code's `/model` discovery keeps only ids containing `claude` or
+`anthropic`. The `/v1/models` endpoint added for Codex does not change that
+filtering.
+Произвольные идентификаторы
 перечисляются настройкой `modelPicker.options` (Claude Code v2.1.242 и
 новее), а её CLI читает только из managed-настроек, из файла, переданного
 через `--settings`, и из пользовательских настроек.

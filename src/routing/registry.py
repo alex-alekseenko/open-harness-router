@@ -7,7 +7,8 @@ from typing import Any
 
 from log import get_logger
 from providers.base import Provider
-from providers.factory import build_provider
+from providers.factory import build_provider, build_responses_provider
+from providers.responses import ResponsesProvider
 from routing.matcher import match_model
 from routing.schema import (
     PricingCfg,
@@ -16,6 +17,7 @@ from routing.schema import (
     RoutingRule,
     effective_pricing,
 )
+from services.codex_catalog import load_catalog
 from settings import Settings
 
 logger = get_logger(__name__)
@@ -53,6 +55,9 @@ class ProviderRegistry:
         providers: dict[str, Provider],
         rules: list[RoutingRule],
         default_provider: str,
+        responses_providers: dict[str, ResponsesProvider] | None = None,
+        responses_default: str | None = None,
+        codex_catalog: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the registry.
 
@@ -60,10 +65,17 @@ class ProviderRegistry:
             providers: providers keyed by name.
             rules: routing rules (in priority order).
             default_provider: name of the default provider.
+            responses_providers: native Responses transports keyed by the same
+                provider names; absent for manually built Messages-only registries.
+            responses_default: independent fallback provider for Responses requests.
+            codex_catalog: native model metadata to merge with custom model rules.
         """
         self.providers = providers
         self.rules = rules
         self.default_provider = default_provider
+        self.responses_providers = responses_providers or {}
+        self.responses_default = responses_default
+        self.codex_catalog = codex_catalog or {"models": []}
 
     @classmethod
     def build(cls, config: RoutingConfig, settings: Settings) -> ProviderRegistry:
@@ -76,17 +88,31 @@ class ProviderRegistry:
         Returns:
             The built provider registry.
         """
+        catalog = load_catalog(config.codex_catalog_path) if config.codex_catalog_path else None
         providers = {
-            name: build_provider(name, cfg, settings)
-            for name, cfg in config.providers.items()
+            name: build_provider(name, cfg, settings) for name, cfg in config.providers.items()
         }
-        return cls(providers, config.rules, config.default.provider)
+        responses_providers = {}
+        for name, cfg in config.providers.items():
+            native = build_responses_provider(name, cfg, settings)
+            if native is not None:
+                responses_providers[name] = native
+        return cls(
+            providers,
+            config.rules,
+            config.default.provider,
+            responses_providers,
+            config.responses_default.provider if config.responses_default else None,
+            catalog,
+        )
 
-    def resolve(self, model: str) -> RouteDecision:
+    def resolve(self, model: str, *, default_provider: str | None = None) -> RouteDecision:
         """Resolve the route for a model name.
 
         Args:
             model: model name from the request body.
+            default_provider: protocol-specific fallback; explicit matching rules
+                always take precedence.
 
         Returns:
             The routing decision (provider + optional model substitution).
@@ -101,7 +127,7 @@ class ProviderRegistry:
                     effective_pricing(provider.cfg, rule),
                     self._pricing_source(rule),
                 )
-        default = self.providers[self.default_provider]
+        default = self.providers[default_provider or self.default_provider]
         return RouteDecision(
             default,
             None,
@@ -258,3 +284,5 @@ class ProviderRegistry:
         """Close all providers."""
         for provider in self.providers.values():
             await provider.aclose()
+        for native in self.responses_providers.values():
+            await native.aclose()
