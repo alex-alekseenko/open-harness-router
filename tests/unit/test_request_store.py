@@ -288,16 +288,26 @@ def _now() -> datetime:
 
 
 @pytest.mark.parametrize(
-    ("window", "days", "bucket"),
-    [("24h", 1, "hour"), ("7d", 7, "day"), ("30d", 30, "day"), ("all", 365, "day")],
+    ("window", "span", "bucket"),
+    [
+        ("5m", timedelta(minutes=5), "hour"),
+        ("30m", timedelta(minutes=30), "hour"),
+        ("60m", timedelta(minutes=60), "hour"),
+        ("6h", timedelta(hours=6), "hour"),
+        ("12h", timedelta(hours=12), "hour"),
+        ("24h", timedelta(days=1), "hour"),
+        ("7d", timedelta(days=7), "day"),
+        ("30d", timedelta(days=30), "day"),
+        ("all", timedelta(days=365), "day"),
+    ],
 )
 def test_resolve_window_maps_each_name_to_its_range(
-    window: str, days: int, bucket: str
+    window: str, span: timedelta, bucket: str
 ) -> None:
     resolved = resolve_window(window=window, start=None, end=None, retention_days=365, now=_now())
     assert resolved.label == window
     assert resolved.bucket == bucket
-    assert resolved.start == (_now() - timedelta(days=days)).isoformat()
+    assert resolved.start == (_now() - span).isoformat()
     assert resolved.end is None
 
 

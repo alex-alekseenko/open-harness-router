@@ -75,10 +75,18 @@ h1, h2 { margin: 0; }
   display: flex;
   flex-wrap: wrap;
   gap: 4px 14px;
-  align-items: baseline;
+  align-items: center;
 }
 
-.brand .title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+.brand .title {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.brand-icon { display: block; flex: none; object-fit: contain; }
 .brand .fact { color: var(--muted); font-size: 12px; }
 .brand .fact b { color: var(--fg); font-weight: 600; }
 
@@ -104,52 +112,59 @@ h1, h2 { margin: 0; }
 .dot.warn { background: var(--warn); }
 .live.live-stale { color: var(--warn); }
 
-.segmented {
-  display: inline-flex;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--panel);
+/* The time picker edits a draft; the trigger always names the applied range. */
+.time-controls { display: flex; align-items: center; gap: 6px; }
+.time-picker { position: relative; min-width: 0; }
+.time-range-trigger, .refresh-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+  min-height: 34px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--fg); font: 12px var(--font); cursor: pointer;
 }
-
-.segmented button {
-  font: inherit;
-  font-size: 12px;
-  padding: 4px 12px;
-  border: 0;
-  border-right: 1px solid var(--line);
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
+.time-range-trigger { max-width: min(480px, calc(100vw - 84px)); }
+.time-range-trigger > span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.time-range-trigger svg, .range-chevron { flex: none; }
+.range-chevron { width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); margin: -3px 2px 0 4px; }
+.time-range-trigger:hover, .refresh-button:hover, .time-range-trigger[aria-expanded="true"] { border-color: var(--accent); }
+.time-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.refresh-button { padding: 8px; }
+.time-range-panel {
+  position: absolute; z-index: 30; right: 0; top: calc(100% + 8px);
+  width: 520px; max-width: calc(100vw - 32px); max-height: min(690px, calc(100dvh - 130px));
+  overflow: auto; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); box-shadow: 0 12px 40px #0003; color: var(--fg); font-size: 13px;
 }
-
-.segmented button:last-child { border-right: 0; }
-.segmented button:hover { color: var(--fg); }
-.segmented button[aria-pressed="true"] {
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.custom-range {
-  max-width: 1440px;
-  margin: 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  font-size: 12px;
-  padding-top: 8px;
-}
-
-.custom-range input[type="date"] {
-  font: inherit;
-  font-size: 12px;
-  padding: 3px 6px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
-  color: var(--fg);
+.range-panel-heading { display: flex; align-items: center; justify-content: space-between; padding: 13px 18px 9px; }
+.range-panel-heading strong { font-weight: 600; font-size: 14px; }
+.range-close { border: 0; background: transparent; color: var(--muted); cursor: pointer; font: 22px/1 var(--font); padding: 3px 5px; }
+.range-tabs { display: flex; gap: 20px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+.range-tabs button { background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 10px 0; color: var(--muted); font: inherit; cursor: pointer; }
+.range-tabs button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
+.range-content { padding: 18px; margin: 0; }
+.range-section-label { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; margin-bottom: 10px; }
+.range-presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
+.range-presets button { display: flex; align-items: center; justify-content: space-between; gap: 8px; text-align: left; padding: 9px 10px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--fg); font: inherit; cursor: pointer; }
+.range-presets button:hover, .range-recent button:hover { background: var(--panel-2); }
+.range-presets button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.range-recent { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+.range-recent button { display: block; width: 100%; text-align: left; padding: 7px 10px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font: 12px var(--font); cursor: pointer; }
+.range-date-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.range-date-fields label { display: flex; flex-direction: column; gap: 8px; min-width: 0; font-size: 12px; }
+.range-date-fields input { width: 100%; min-width: 0; font: 12px var(--font); padding: 9px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--fg); }
+.range-date-fields input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.range-help { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 14px 0; }
+.range-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 8px; }
+.range-actions .btn { padding: 7px 13px; }
+.range-actions .range-apply { background: var(--accent); border-color: var(--accent); color: var(--panel); font-weight: 600; }
+.range-panel-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; border-top: 1px solid var(--line); background: var(--panel-2); padding: 11px 18px; font-size: 11px; color: var(--muted); }
+@media (max-width: 720px) {
+  .time-controls { width: 100%; }
+  .time-picker { flex: 1; }
+  .time-range-trigger { width: 100%; max-width: none; justify-content: flex-start; }
+  .time-range-trigger .range-chevron { margin-left: auto; }
+  .time-range-panel { position: fixed; left: 12px; right: 12px; top: 152px; width: auto; max-width: none; max-height: calc(100dvh - 164px); }
+  .range-date-fields { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .range-presets { gap: 4px; }
+  .range-presets button { font-size: 12px; padding: 9px 7px; }
 }
 
 .btn {

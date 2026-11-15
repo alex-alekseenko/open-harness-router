@@ -43,6 +43,7 @@ _STATIC_DIR = Path(__file__).with_name("static")
 _STATIC_FILES: dict[str, str] = {
     "app.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
+    "samurai.png": "image/png",
     "vendor/preact.mjs": "text/javascript; charset=utf-8",
     "vendor/preact-hooks.mjs": "text/javascript; charset=utf-8",
     "vendor/htm.mjs": "text/javascript; charset=utf-8",
@@ -124,9 +125,11 @@ async def dashboard_state(
     request: Request,
     settings: SettingsDep,
     registry: RegistryDep,
-    window: str = Query(default="30d", description="24h | 7d | 30d | all | custom"),
-    start: str | None = Query(default=None, description="custom range start, YYYY-MM-DD"),
-    end: str | None = Query(default=None, description="custom range end, YYYY-MM-DD"),
+    window: str = Query(default="30d", description=" | ".join(WINDOW_LABELS)),
+    start: str | None = Query(default=None, description="inclusive start, YYYY-MM-DD or ISO-8601"),
+    end: str | None = Query(
+        default=None, description="exclusive end timestamp, or inclusive YYYY-MM-DD",
+    ),
 ) -> dict[str, Any]:
     """Return the monitor's snapshot plus the routing table and proxy facts.
 

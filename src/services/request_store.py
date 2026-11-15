@@ -319,15 +319,20 @@ def _range_where(start: str, end: str | None) -> tuple[str, tuple[object, ...]]:
 # The windows the dashboard offers, mapped to how far back they reach.
 # "all" is the retention window: every row the store keeps, which is what
 # a reader means by "everything we have".
-_WINDOW_DAYS: dict[str, int | None] = {
-    "24h": 1,
-    "7d": 7,
-    "30d": 30,
+_WINDOW_SPANS: dict[str, timedelta | None] = {
+    "5m": timedelta(minutes=5),
+    "30m": timedelta(minutes=30),
+    "60m": timedelta(minutes=60),
+    "6h": timedelta(hours=6),
+    "12h": timedelta(hours=12),
+    "24h": timedelta(days=1),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
     "all": None,
 }
 
 # The named windows plus ``custom``, in the order the dashboard shows them.
-WINDOW_LABELS: tuple[str, ...] = (*_WINDOW_DAYS, "custom")
+WINDOW_LABELS: tuple[str, ...] = (*_WINDOW_SPANS, "custom")
 
 
 @dataclass(frozen=True)
@@ -361,8 +366,8 @@ def resolve_window(
 ) -> ResolvedWindow:
     """Turn the dashboard's window request into the range to query.
 
-    ``window`` names one of :data:`_WINDOW_DAYS` (``24h``, ``7d``, ``30d``,
-    ``all``); ``start``/``end`` are an explicit custom range in
+    ``window`` names one of :data:`_WINDOW_SPANS` (minute, hour and day
+    presets, or ``all``); ``start``/``end`` are an explicit custom range in
     ``YYYY-MM-DD`` (or full ISO-8601) and take precedence when given.
     ``start`` is required for a custom range, ``end`` is optional and means
     "through now". Both the named windows and the custom range are clamped
@@ -417,12 +422,12 @@ def resolve_window(
     label = window or "30d"
     if label == "custom":
         raise ValueError("a custom range needs start (YYYY-MM-DD or ISO-8601)")
-    if label not in _WINDOW_DAYS:
-        raise ValueError(f"unknown window {label!r}; expected one of {sorted(_WINDOW_DAYS)}")
-    days = _WINDOW_DAYS[label]
-    if days is None:
+    if label not in _WINDOW_SPANS:
+        raise ValueError(f"unknown window {label!r}; expected one of {sorted(_WINDOW_SPANS)}")
+    span = _WINDOW_SPANS[label]
+    if span is None:
         return ResolvedWindow(label=label, start=floor.isoformat(), end=None, bucket="day")
-    start_dt = now - timedelta(days=days)
+    start_dt = now - span
     clamped_start = max(start_dt, floor)
     return ResolvedWindow(
         label=label,
@@ -474,7 +479,7 @@ def _parse_bound(value: str, *, end_of_day: bool) -> datetime:
         parsed = datetime.fromisoformat(text)
     except ValueError as exc:
         raise ValueError(f"invalid date {value!r}; expected YYYY-MM-DD or ISO-8601") from exc
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _as_int(value: object) -> int | None:

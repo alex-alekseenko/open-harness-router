@@ -4,7 +4,7 @@
 // state the router exposes at GET /dashboard/state. The state is polled
 // every two seconds, so every figure on the page is live.
 //
-// The selected window (24h / 7d / 30d / all / custom) governs every
+// The selected window (minute / hour / day presets, all or custom) governs every
 // statistic except the live ones ("in flight", the event feed), because
 // those describe now and not the window. The window lives in the URL
 // query; localStorage is only a fallback, and the URL always wins.
@@ -21,7 +21,7 @@ const VIEW_KEY = "ohr.window";
 const CLOSED_KEY = "ohr.providers.closed";
 const HIDDEN_KEY_PREFIX = "ohr.chart.hidden.";
 const DEFAULT_VIEW = { window: "30d", start: "", end: "" };
-const FALLBACK_WINDOWS = ["24h", "7d", "30d", "all", "custom"];
+const FALLBACK_WINDOWS = ["5m", "30m", "60m", "6h", "12h", "24h", "7d", "30d", "all", "custom"];
 const SERIES_COUNT = 8;
 // The second encoding once the colours run out: solid, dashed, dotted,
 // dash-dotted (canvas dash arrays, in px).
@@ -106,6 +106,22 @@ const sumBy = (rows, pick) =>
 
 // ---- the selected window ----------------------------------------------
 
+// datetime-local fields show the reader's wall clock; URLs and API calls
+// keep absolute timestamps so a shared link selects the same interval.
+function rangeDraft(view) {
+  const localInput = (value, endOfDay) => {
+    if (!value) return "";
+    const date = new Date(value);
+    if (isNaN(date)) return "";
+    // Preserve the inclusive end day of older date-only links.
+    if (value.length === 10 && endOfDay) date.setUTCDate(date.getUTCDate() + 1);
+    const pad = (n) => String(n).padStart(2, "0");
+    return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) +
+      "T" + pad(date.getHours()) + ":" + pad(date.getMinutes());
+  };
+  return { start: localInput(view.start, false), end: localInput(view.end, true) };
+}
+
 function normaliseView(view) {
   const next = {
     window: view && view.window ? String(view.window) : DEFAULT_VIEW.window,
@@ -113,12 +129,13 @@ function normaliseView(view) {
     end: view && view.end ? String(view.end) : "",
   };
   if (next.window === "custom" && !next.start && !next.end) {
-    // A custom range with no dates reads nothing: seed it with the last
+    // A custom range with no bounds reads nothing: seed it with the last
     // seven days so the first click shows something.
     const today = new Date();
+    today.setSeconds(0, 0);
     const week = new Date(today.getTime() - 7 * 86400000);
-    next.start = week.toISOString().slice(0, 10);
-    next.end = today.toISOString().slice(0, 10);
+    next.start = week.toISOString();
+    next.end = today.toISOString();
   }
   return next;
 }
@@ -874,16 +891,21 @@ function renderProviderRow(row, props) {
 
 const WINDOW_LABELS = {
   today: "Today",
-  "24h": "24h",
-  "7d": "7d",
-  "30d": "30d",
-  all: "All",
-  custom: "Custom",
+  "5m": "Last 5 minutes",
+  "30m": "Last 30 minutes",
+  "60m": "Last 60 minutes",
+  "6h": "Last 6 hours",
+  "12h": "Last 12 hours",
+  "24h": "Last 24 hours",
+  "7d": "Last 7 days",
+  "30d": "Last 30 days",
+  all: "All available data",
+  custom: "Custom range",
 };
 
-// The named windows that slide with the clock: their oldest hours drop out
+// The named windows that slide with the clock: their oldest requests drop out
 // as time passes, so their totals can fall.
-const ROLLING_WINDOWS = ["24h", "7d", "30d"];
+const ROLLING_WINDOWS = FALLBACK_WINDOWS.filter((name) => name !== "all" && name !== "custom");
 
 function windowLine(history, selected) {
   if (!history || !history.window) return "storage off — the figures are since process start";
@@ -904,6 +926,183 @@ function windowLine(history, selected) {
   return parts.join(" · ");
 }
 
+function timeRangeLabel(view) {
+  if (view.window !== "custom") return WINDOW_LABELS[view.window] || view.window;
+  return fmtLocalDateTime(view.start) + " → " + (view.end ? fmtLocalDateTime(view.end) : "now");
+}
+
+function readRecentRanges() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("ohr.recent-ranges") || "[]");
+    return Array.isArray(saved) ? saved.filter((item) => item &&
+      (FALLBACK_WINDOWS.includes(item.window) || item.window === "today") &&
+      (item.window !== "custom" || (item.start && !isNaN(new Date(item.start)))))
+      .slice(0, 5) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// Editing is local to the picker; only an applied range changes polling.
+function TimePicker({ view, windows, history, onApply }) {
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState("quick");
+  const [draft, setDraft] = useState(() => rangeDraft(view));
+  const [error, setError] = useState(null);
+  const [recent, setRecent] = useState(readRecentRanges);
+  const root = useRef(null);
+  const trigger = useRef(null);
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Local time";
+
+  useEffect(() => {
+    if (!open) return;
+    root.current.querySelector('[role="tab"][aria-selected="true"]').focus();
+    const outside = (event) => {
+      if (!root.current.contains(event.target)) setOpen(false);
+    };
+    const escape = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        trigger.current.focus();
+      }
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+
+  const close = () => {
+    setOpen(false);
+    trigger.current.focus();
+  };
+  const toggle = () => {
+    if (!open) {
+      const bounds = view.window === "custom" ? view : {
+        start: history && history.window ? history.window.start : "",
+        end: new Date().toISOString(),
+      };
+      setDraft(rangeDraft(bounds));
+      setError(null);
+      setTab(view.window === "custom" ? "absolute" : "quick");
+    }
+    setOpen(!open);
+  };
+  const select = (next) => {
+    const applied = normaliseView(next);
+    const updated = [applied, ...recent.filter((item) => viewQuery(item) !== viewQuery(applied))]
+      .slice(0, 5);
+    setRecent(updated);
+    try {
+      window.localStorage.setItem("ohr.recent-ranges", JSON.stringify(updated));
+    } catch (e) {
+      /* the picker still works without browser storage */
+    }
+    onApply(applied);
+    close();
+  };
+  const applyCustom = (event) => {
+    event.preventDefault();
+    const start = new Date(draft.start);
+    const end = draft.end ? new Date(draft.end) : null;
+    if (isNaN(start) || (end && isNaN(end))) {
+      setError("Choose valid dates and times.");
+      return;
+    }
+    if (start >= (end || new Date())) {
+      setError("From must be before To (or now for an open range).");
+      return;
+    }
+    select({ window: "custom", start: start.toISOString(), end: end ? end.toISOString() : "" });
+  };
+  const edit = (field, value) => {
+    setError(null);
+    setDraft((previous) => ({ ...previous, [field]: value }));
+  };
+  const tabKey = (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? "quick" : event.key === "End" ? "absolute"
+      : tab === "quick" ? "absolute" : "quick";
+    setTab(next);
+    root.current.querySelector('[data-tab="' + next + '"]').focus();
+  };
+
+  return html`
+    <div class="time-picker" ref=${root}>
+      <button type="button" class="time-range-trigger" ref=${trigger}
+        aria-label=${"Time range: " + timeRangeLabel(view)} aria-haspopup="dialog"
+        aria-expanded=${open ? "true" : "false"} aria-controls="time-range-panel"
+        onClick=${toggle}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        <span>${timeRangeLabel(view)}</span><span class="range-chevron" aria-hidden="true"></span>
+      </button>
+      ${open ? html`
+        <section id="time-range-panel" class="time-range-panel" role="dialog" aria-label="Select time range">
+          <div class="range-panel-heading"><strong>Time range</strong>
+            <button type="button" class="range-close" aria-label="Close time picker" onClick=${close}>×</button>
+          </div>
+          <div class="range-tabs" role="tablist" aria-label="Range selection mode">
+            ${[["quick", "Quick select"], ["absolute", "Custom range"]].map(([key, label]) => html`
+              <button type="button" role="tab" id=${"range-tab-" + key} data-tab=${key}
+                aria-selected=${tab === key ? "true" : "false"} aria-controls=${"range-content-" + key}
+                tabIndex=${tab === key ? 0 : -1} onKeyDown=${tabKey} onClick=${() => setTab(key)}>${label}</button>
+            `)}
+          </div>
+          ${tab === "quick" ? html`
+            <div id="range-content-quick" role="tabpanel" aria-labelledby="range-tab-quick" class="range-content">
+              <div class="range-section-label">Common ranges</div>
+              <div class="range-presets">
+                ${windows.filter((name) => name !== "custom").map((name) => html`
+                  <button type="button" aria-pressed=${view.window === name ? "true" : "false"}
+                    onClick=${() => select({ window: name })}>
+                    <span>${WINDOW_LABELS[name] || name}</span>
+                    <span aria-hidden="true">${view.window === name ? "✓" : ""}</span>
+                  </button>
+                `)}
+              </div>
+              ${recent.length ? html`
+                <div class="range-recent"><div class="range-section-label">Recently used</div>
+                  ${recent.map((item) => html`
+                    <button type="button" aria-label=${"Reuse " + timeRangeLabel(item)}
+                      onClick=${() => select(item)}>${timeRangeLabel(item)}</button>
+                  `)}
+                </div>
+              ` : null}
+            </div>
+          ` : html`
+            <form id="range-content-absolute" role="tabpanel" aria-labelledby="range-tab-absolute"
+              class="range-content" onSubmit=${applyCustom}>
+              <div class="range-section-label">Choose an interval</div>
+              <div class="range-date-fields">
+                <label for="range-start">From
+                  <input type="datetime-local" id="range-start" required step="60" value=${draft.start}
+                    onInput=${(e) => edit("start", e.currentTarget.value)} />
+                </label>
+                <label for="range-end">To
+                  <input type="datetime-local" id="range-end" step="60" value=${draft.end}
+                    onInput=${(e) => edit("end", e.currentTarget.value)} />
+                </label>
+              </div>
+              <p class="range-help">From is included; To is excluded. Leave To empty to follow activity through now.</p>
+              ${error ? html`<p class="range-error" role="alert">${error}</p>` : null}
+              <div class="range-actions">
+                <button type="button" class="btn" onClick=${close}>Cancel</button>
+                <button type="submit" class="btn range-apply">Apply range</button>
+              </div>
+            </form>
+          `}
+          <div class="range-panel-footer"><span>${zone}</span><span>Local time · minute precision</span></div>
+        </section>
+      ` : null}
+    </div>
+  `;
+}
+
 function Header(props) {
   const { state, status, view, rangeError } = props;
   const served = (state && state.windows) || FALLBACK_WINDOWS;
@@ -915,7 +1114,10 @@ function Header(props) {
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand">
-          <span class="title">open-harness-router</span>
+          <span class="title">
+            <img class="brand-icon" src="/dashboard/static/samurai.png" width="40" height="40" alt="" />
+            open-harness-router
+          </span>
           <span class="fact">version <b>${state ? state.version || "?" : "…"}</b></span>
           ${state && state.restart_required
             ? html`<span class="pill">checkout ${state.checkout_version} · restart required</span>`
@@ -933,47 +1135,18 @@ function Header(props) {
               : "connecting…"}
           </span>
         </div>
-        <div class="segmented" role="group" aria-label="Time range">
-          ${windows.map((name) =>
-            html`
-              <button
-                key=${name}
-                type="button"
-                aria-pressed=${view.window === name ? "true" : "false"}
-                onClick=${() => props.onWindow(name)}
-              >
-                ${WINDOW_LABELS[name] || name}
-              </button>
-            `
-          )}
+        <div class="time-controls">
+          <${TimePicker} view=${view} windows=${windows} history=${state && state.history}
+            onApply=${props.onApplyView} />
+          <button type="button" class="refresh-button" aria-label="Refresh now" title="Refresh now"
+            onClick=${props.onRefresh}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="1.7" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1"/></svg>
+          </button>
         </div>
       </div>
-      ${view.window === "custom"
-        ? html`
-            <div class="custom-range">
-              <span class="muted">from</span>
-              <input
-                type="date"
-                id="range-start"
-                value=${props.draft.start}
-                onChange=${(e) => props.onDraft("start", e.currentTarget.value)}
-              />
-              <span class="muted">to</span>
-              <input
-                type="date"
-                id="range-end"
-                value=${props.draft.end}
-                onChange=${(e) => props.onDraft("end", e.currentTarget.value)}
-              />
-              <button type="button" class="btn" id="range-apply" onClick=${props.onApply}>
-                Apply
-              </button>
-              ${rangeError ? html`<span class="range-error">${rangeError}</span>` : null}
-            </div>
-          `
-        : null}
-      ${rangeError && view.window !== "custom"
-        ? html`<div class="window-line"><span class="range-error">${rangeError}</span></div>`
+      ${rangeError
+        ? html`<div class="window-line"><span class="range-error" role="alert">${rangeError}</span></div>`
         : null}
       <div class="window-line">
         ${windowLine(state ? state.history : null, view.window)}
@@ -1158,13 +1331,8 @@ function App() {
   const [state, setState] = useState(null);
   const [status, setStatus] = useState({ kind: "connecting", reason: "", at: null });
   const [rangeError, setRangeError] = useState(null);
+  const [refreshToken, setRefreshToken] = useState(0);
   const [view, setView] = useState(readInitialView);
-  // The dates the custom range is edited with; they reach the router only
-  // when Apply is pressed.
-  const [draft, setDraft] = useState(() => ({
-    start: view.start,
-    end: view.end,
-  }));
   const [closed, setClosed] = useState(readClosedProviders);
   const { colours, version } = useThemeColours();
 
@@ -1213,7 +1381,7 @@ function App() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [viewKey]);
+  }, [viewKey, refreshToken]);
 
   // The window lives in the URL, so a reload (and a link) keep it.
   useEffect(() => {
@@ -1224,14 +1392,10 @@ function App() {
     }
   }, [viewKey]);
 
-  // The edited dates follow the window.
-  useEffect(() => {
-    setDraft({ start: view.start, end: view.end });
-  }, [viewKey]);
-
   const applyView = (next) => {
     const normalised = normaliseView(next);
     setView(normalised);
+    setRangeError(null);
     try {
       window.localStorage.setItem(VIEW_KEY, JSON.stringify(normalised));
     } catch (e) {
@@ -1336,14 +1500,8 @@ function App() {
       status=${status}
       view=${view}
       rangeError=${rangeError}
-      onWindow=${(name) => applyView({ window: name, start: view.start, end: view.end })}
-      draft=${draft}
-      onDraft=${(field, value) =>
-        setDraft((previous) => ({
-          start: field === "start" ? value : previous.start,
-          end: field === "end" ? value : previous.end,
-        }))}
-      onApply=${() => applyView({ window: "custom", start: draft.start, end: draft.end })}
+      onApplyView=${applyView}
+      onRefresh=${() => setRefreshToken((previous) => previous + 1)}
     />
     <main class="wrap">
       <div class="tiles">
