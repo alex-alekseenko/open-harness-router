@@ -3,36 +3,59 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 from errors import UpstreamError
+
+
+def _leaf_tools(definitions: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    """Visit named tools inside both flat lists and namespace wrappers."""
+    for tool in definitions:
+        if tool.get("type") == "namespace":
+            yield from _leaf_tools(tool.get("tools", []))
+        else:
+            yield tool
 
 
 class CustomToolsAdapter:
     """Keep custom tool identity on the client side and JSON arguments upstream."""
 
     def __init__(self, payload: dict[str, Any], names: list[str]) -> None:
-        self.names = {
-            tool["name"]
-            for tool in payload.get("tools", [])
-            if tool.get("type") == "custom" and tool.get("name") in names
-        }
+        self.names: set[str] = set()
+        definitions = list(payload.get("tools", []))
         items = payload.get("input")
         if isinstance(items, list):
+            for item in items:
+                if item.get("type") == "additional_tools":
+                    definitions.extend(item.get("tools", []))
             self.names.update(
                 item["name"]
                 for item in items
                 if item.get("type") == "custom_tool_call" and item.get("name") in names
             )
+        self.names.update(
+            tool["name"] for tool in _leaf_tools(definitions)
+            if tool.get("type") == "custom" and tool.get("name") in names
+        )
         self.item_ids: set[str] = set()
 
-    def request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Translate definitions, replayed calls and their matching outputs together."""
-        payload = dict(payload)
+    def _tools(
+        self, definitions: list[dict[str, Any]], *, seen: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Adapt definitions wherever Codex carries them, including namespaces."""
         tools = []
-        for original_tool in payload.get("tools", []):
+        for original_tool in definitions:
             tool = original_tool
+            if tool.get("type") == "namespace":
+                children = self._tools(tool.get("tools", []), seen=seen)
+                if not children:
+                    continue
+                tool = {**tool, "tools": children}
+            elif seen is not None and isinstance(tool.get("name"), str):
+                if tool["name"] in seen:
+                    continue
+                seen.add(tool["name"])
             if tool.get("type") == "custom" and tool.get("name") in self.names:
                 tool = {
                     "type": "function",
@@ -49,7 +72,13 @@ class CustomToolsAdapter:
                     },
                 }
             tools.append(tool)
-        payload["tools"] = tools
+        return tools
+
+    def request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Translate definitions, replayed calls and their matching outputs together."""
+        payload = dict(payload)
+        if "tools" in payload:
+            payload["tools"] = self._tools(payload["tools"])
         items = payload.get("input")
         if isinstance(items, list):
             call_ids = {
@@ -58,9 +87,21 @@ class CustomToolsAdapter:
                 if item.get("type") == "custom_tool_call" and item.get("name") in self.names
             }
             converted = []
-            for original_item in items:
+            # Some upstreams reject duplicate definitions across current tools
+            # and replayed additions. Current tools, then the latest historical
+            # definition, win; calls and outputs remain in their original order.
+            seen = {
+                tool["name"] for tool in _leaf_tools(payload.get("tools", []))
+                if isinstance(tool.get("name"), str)
+            }
+            for original_item in reversed(items):
                 item = original_item
-                if item.get("type") == "custom_tool_call" and item.get("name") in self.names:
+                if item.get("type") == "additional_tools":
+                    tools = self._tools(item.get("tools", []), seen=seen)
+                    if not tools:
+                        continue
+                    item = {**item, "tools": tools}
+                elif item.get("type") == "custom_tool_call" and item.get("name") in self.names:
                     item = dict(item)
                     item["type"] = "function_call"
                     item["arguments"] = json.dumps({"input": item.pop("input")})
@@ -70,7 +111,7 @@ class CustomToolsAdapter:
                 ):
                     item = {**item, "type": "function_call_output"}
                 converted.append(item)
-            payload["input"] = converted
+            payload["input"] = list(reversed(converted))
         choice = payload.get("tool_choice")
         if (
             isinstance(choice, dict)
