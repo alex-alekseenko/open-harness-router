@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import gzip
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -72,7 +72,9 @@ async def test_dashboard_state_starts_empty_with_routes_and_proxy_facts(
     assert state["proxy"]["enabled"] is False
     assert state["proxy"]["mitm_hosts"] == ["api.anthropic.com"]
     assert state["proxy"]["root_certificate"].endswith("rootCA.pem")
-    assert state["windows"] == ["24h", "7d", "30d", "all", "custom"]
+    assert state["windows"] == [
+        "5m", "30m", "60m", "6h", "12h", "24h", "7d", "30d", "all", "custom",
+    ]
     # The ASGI test app runs without the lifespan, so no store is attached
     # and the persisted history degrades to None rather than breaking state.
     assert state["history"] is None
@@ -366,6 +368,40 @@ async def test_dashboard_state_answers_a_custom_range(
             params={"window": "custom", "start": "2026-10-10", "end": "2026-10-01"},
         )
         assert broken.status_code == 400
+    finally:
+        Monitor.current().attach_store(None)
+        await store.aclose()
+
+
+@pytest.mark.parametrize("offset_hours", [0, 3, -5])
+async def test_custom_minutes_filter_exact_bounds_in_any_timezone(
+    client: httpx.AsyncClient, tmp_path: Path, offset_hours: int,
+) -> None:
+    """Offset timestamps select the same [start, end) rows as UTC timestamps."""
+    start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(hours=1)
+    end = start + timedelta(minutes=17)
+    zone = timezone(timedelta(hours=offset_hours))
+    store = RequestStore(db_path=tmp_path / "m.db", retention_days=365, window_days=30)
+    Monitor.current().attach_store(store)
+    timestamps = (start - timedelta(milliseconds=1), start, end - timedelta(milliseconds=1), end)
+    for timestamp in timestamps:
+        store.record({"ts": timestamp.isoformat(), "kind": "request", "status": 200})
+    try:
+        response = await client.get(
+            "/dashboard/state",
+            params={
+                "window": "custom",
+                "start": start.astimezone(zone).isoformat(),
+                "end": end.astimezone(zone).isoformat(),
+            },
+        )
+        assert response.status_code == 200
+        history = response.json()["history"]
+        assert history["window"]["start"] == start.isoformat()
+        assert history["window"]["end"] == end.isoformat()
+        assert history["totals"]["requests"] == 2
+        assert sum(row["requests"] for row in history["series"]) == 2
+        assert sum(row["requests"] for row in history["breakdown"]) == 2
     finally:
         Monitor.current().attach_store(None)
         await store.aclose()

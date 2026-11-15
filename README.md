@@ -1413,11 +1413,21 @@ only in memory, while the rolling window is read back from disk.
 - **Time windows**: the range selector sits above the tiles and governs the
   whole page, Kibana-style -- the tiles, the charts, the Providers table and
   the trend all read the same period, so nothing has to be compared across
-  two different windows. It offers `Today`, `24h`, `7d`, `30d`, `all` and a
-  custom range (two date fields; `start` alone means "from that day to
-  now"), and the choice is sent to `GET /dashboard/state` as `window=` and
+  two different windows. It offers `Today`, `5 min`, `30 min`, `60 min`,
+  `6 hours`, `12 hours`, `24h`, `7d`, `30d`, `all` and a
+  custom range with dates, hours and minutes in your browser's local time.
+  Click the current range in the header to open **Quick select** or
+  **Custom range**. Presets apply immediately; custom edits apply only with
+  **Apply range**. The picker remembers your five most recently applied
+  ranges. Escape or a click outside closes it without applying a draft;
+  the adjacent refresh button reloads the current interval immediately.
+  The start is inclusive and the end is exclusive; leave the end blank to
+  follow activity through now. The selected instants are stored in the URL
+  and sent as UTC ISO-8601 timestamps to `GET /dashboard/state` as `window=` and
   `start=`/`end=`, so the same figures come out of `curl`/`jq` without the
-  page. `24h`, `7d` and `30d` are rolling -- an hour of heavy traffic leaving
+  page. Existing date-only API ranges still include the whole end day.
+  The minute, hour and day presets (`5m`, `30m`, `60m`, `6h`, `12h`, `24h`,
+  `7d`, `30d` in the API) are rolling -- a burst of heavy traffic leaving
   the window makes the totals drop -- and the page labels them so; `Today`
   runs from the reader's local midnight and only grows until the next one.
   The server does not know that time zone, so the page sends `Today` as a
