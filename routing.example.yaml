@@ -118,7 +118,8 @@ providers:
   #   drop_params: [temperature, top_p]
   #   # max_tokens is deprecated for Kimi in favor of max_completion_tokens.
   #   # api_flavor is not set -> defaults to the "chat" schema. To enable
-  #   # native Codex ingress, configure a documented responses_base_url.
+  #   # native Codex forwarding, configure a documented responses_base_url.
+  #   # Without it, Codex uses the Responses-to-Messages adapter and this chat path.
   #   # The remaining settings below apply to Messages translation.
   #   # https://platform.kimi.ai/docs/api/chat
   #   token_param: max_completion_tokens

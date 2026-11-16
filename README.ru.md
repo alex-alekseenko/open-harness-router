@@ -4,16 +4,16 @@
 
 ![Дашборд: плитки запросов, ошибок, in-flight, токенов и стоимости, таблицы по провайдерам и моделям, запросы в полёте, лента событий и таблица маршрутов](docs/dashboard.png)
 
-Запуск моделей любого вендора внутри CLI Claude Code. Роутер это одна программа,
-которая принимает запросы в формате Anthropic Messages API
-(`POST /v1/messages`), поэтому Claude Code подключается к ней как к самой
-Anthropic. Для каждого запроса роутер смотрит имя модели и по правилам из
-`routing.yaml` отправляет его одному из настроенных провайдеров. Модели
-Anthropic уходят в Anthropic без изменений (сквозной режим). Любая другая модель
-переводится в формат OpenAI и уходит в сторонний API: OpenAI GPT-5.x (включая
-Responses API, он нужен reasoning-моделям с инструментами), Kimi (Moonshot AI),
-Qwen (Alibaba Cloud Model Studio), Grok (xAI), GLM за корпоративным
-OpenAI-совместимым шлюзом, DeepSeek, OpenRouter, локальный инстанс vLLM.
+Open Harness Router позволяет использовать настроенные модели в Claude Code и
+Codex через общие правила маршрутизации в `routing.yaml`: применяется первое
+совпадение. Для Messages используется сквозное перенаправление или перевод в
+OpenAI. Codex использует нативный Responses, если он настроен; остальные
+провайдеры с собственным ключом работают через адаптер Responses ↔ Messages
+и существующий конвейер провайдера.
+
+Краткая карта проекта, порядок запуска и ограничения собраны в
+[KICKOFF.md](KICKOFF.md). Здесь находится подробный справочник по эксплуатации;
+полная настройка Codex описана в [английском руководстве](README.md#connecting-codex).
 
 Оркестратор Claude Code всегда остаётся на нативных моделях Anthropic.
 Правила `claude-*` и правила алиасов ведут в сквозной режим, а маршрут по
@@ -45,27 +45,34 @@ forward-proxy (`make run-proxy`): клиент оставляет `ANTHROPIC_BAS
 
 ```bash
 uv sync
-cp .env.example .env                    # no required key to start, see below
-cp routing.example.yaml routing.yaml    # personal provider registry, not committed to the repo
+test -e .env || cp .env.example .env
+test -e routing.yaml || cp routing.example.yaml routing.yaml
 ```
 
-## Codex support
+## Подключение Codex
 
-The router also supports Codex CLI through native `POST /v1/responses`, with
-`GET /codex/models` for its model catalog and `GET /v1/models` for OpenAI-style
-discovery. Kimi Code supports this protocol with the same server-side key.
-Own-key providers without a native Responses endpoint use the Responses ↔ Messages
-adapter and the existing Chat Completions conversion where configured. It supports
-streaming, function/freeform tools, namespaces and tool-result continuation. It
-requires full conversation history; optional hosted web search is unavailable on
-translated routes (client tools still work). Regenerate the catalog and restart
-Codex after changing routes. Native forwarding takes precedence when configured.
-Configure `responses_default` and `codex_catalog_path` to keep all native
-Codex models and custom models together in the same picker.
-The combined native-auth profile preserves the `openai` provider identity
-using `openai_base_url`, so existing OpenAI sessions can be resumed through it.
-See [Connecting Codex](README.md#connecting-codex) for configuration, model
-capabilities and the dedicated `codex -p open-harness-router` profile.
+Codex подключается через `POST /v1/responses`. Каталог моделей доступен через
+`GET /codex/models`, список идентификаторов OpenAI — через `GET /v1/models`.
+Если нативный Responses настроен, он имеет приоритет. Остальные провайдеры с
+собственным ключом используют адаптер Responses ↔ Messages и перевод в Chat
+Completions, если он настроен у провайдера. Адаптер поддерживает streaming,
+обычные и freeform-инструменты, пространства имён и продолжение после результата
+инструмента. Для него требуется полная история; встроенный поиск недоступен,
+но клиентские инструменты поиска работают.
+
+Чтобы сохранить нативные модели аккаунта вместе с custom-моделями, настройте
+`responses_default` и `codex_catalog_path`. Профиль нативной авторизации сохраняет
+`model_provider = "openai"` и перенаправляет запросы через `openai_base_url`,
+поэтому сохранённые OpenAI-сессии можно продолжать через роутер.
+
+При смене модели через `-m` сохраняется reasoning effort из профиля. Если
+провайдер не принимает выбранное значение, задайте поддерживаемое через `-c`
+или используйте отдельный профиль. Например, Kimi может отклонить `none`;
+метаданные каталога не переопределяют явно сохранённый effort.
+
+После изменения маршрутов обновите каталог и перезапустите Codex. Полный пример
+профиля `codex -p open-harness-router`, объединение каталогов и ограничения
+адаптера приведены в [руководстве Codex](README.md#connecting-codex).
 
 ## Режимы работы
 

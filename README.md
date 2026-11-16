@@ -4,17 +4,15 @@
 
 ![The dashboard: request, error, in-flight, token and cost tiles, per-provider and per-model tables, the requests in flight, the event feed and the routing table](docs/dashboard.png)
 
-Run models from any vendor inside the Claude Code CLI, and native Responses
-models inside the Codex CLI. The router accepts Anthropic Messages
-(`POST /v1/messages`) and OpenAI Responses (`POST /v1/responses`). For each
-request it reads the model name and, by the rules in `routing.yaml`, sends it
-to one of the configured providers. Codex requests use native Responses
-forwarding. Claude Code's Anthropic requests go to Anthropic unchanged
-(passthrough); other models use a compatible passthrough or translation into
-the OpenAI format: OpenAI GPT-5.x (including the
-Responses API, needed for reasoning models with tools), Kimi (Moonshot AI), Qwen
-(Alibaba Cloud Model Studio), Grok (xAI), GLM behind a corporate
-OpenAI-compatible gateway, DeepSeek, OpenRouter, or a local vLLM instance.
+Use configured models from multiple vendors in Claude Code and Codex through
+one local router. Anthropic Messages (`POST /v1/messages`) and OpenAI Responses
+(`POST /v1/responses`) share the first-match routing rules in `routing.yaml`.
+Messages uses compatible passthrough or OpenAI translation. Codex uses native
+Responses when configured, otherwise own-key providers use Responses ↔ Messages
+adapters and the existing Chat Completions or Responses pipeline.
+
+Start with [KICKOFF.md](KICKOFF.md) for the architecture, setup sequence,
+model discovery and limitations. This README is the detailed operational reference.
 
 The Claude Code orchestrator always stays on native Anthropic models: the
 `claude-*` and alias rules route to passthrough, and the default route must be
@@ -44,18 +42,20 @@ client that only knows a base URL. Both are described in "Run modes" below.
 
 ```bash
 uv sync
-cp .env.example .env                    # no required key to start, see below
-cp routing.example.yaml routing.yaml    # personal provider registry, not committed to the repo
+test -e .env || cp .env.example .env
+test -e routing.yaml || cp routing.example.yaml routing.yaml
 ```
 
 ## Connecting Codex
 
 Codex connects to the HTTP listener using the OpenAI Responses protocol:
 `POST /v1/responses`. The router applies the same first-match routing rules
-as for Claude Code, then forwards native request bodies and streaming events.
-Tool calls, tool results, images and encrypted reasoning stay in their native
-format. This entrance requires an upstream that supports Responses; it does
-not translate Anthropic-only or Chat Completions-only upstreams into Responses.
+as for Claude Code. When a native Responses endpoint is configured, request
+bodies and streaming events retain their native format, including tool calls,
+images and encrypted reasoning. Other own-key providers use Responses ↔ Messages
+adapters, including the existing Chat Completions translation where configured.
+See [provider compatibility and adapter limitations](#provider-compatibility)
+below before selecting a route.
 
 Codex's built-in image tool also uses its configured provider base URL.
 The router forwards native JSON `POST /v1/images/generations` and
@@ -129,6 +129,13 @@ entry as the default unless `--model` selects another entry. Explicit routing
 rules still take precedence over `responses_default`. The existing `default`
 continues to control Messages requests.
 
+Set each model's supported/default reasoning levels under its rule's `codex`
+metadata. Switching with `-m` keeps profile-level settings: an explicit saved
+`model_reasoning_effort = "none"` can still be sent to a model that rejects it.
+Catalog metadata does not override that explicit value. Select a supported
+effort with `-c 'model_reasoning_effort="high"'` when required, or use separate
+profiles for models needing different defaults.
+
 Custom catalog entries receive model-specific identity instructions while
 retaining the native coding workflow. Without them Codex's default prompt
 identifies the agent as GPT-6 even when inference goes to another vendor.
@@ -197,8 +204,11 @@ HTTP listener uses a different port. Profiles in this form were verified
 with CLI 0.169.0. Desktop setup and picker behavior must be verified separately;
 the generated profile does not change the desktop's default provider.
 
-Providers with `api_flavor: responses` support native forwarding using their
-existing `base_url`. Set `responses_base_url`, including the API prefix
+### Provider compatibility
+
+Providers of type `openai-translate` with `api_flavor: responses` support native
+forwarding using their existing `base_url`; this flavor is invalid for
+`passthrough`. Set `responses_base_url`, including the API prefix
 (usually `/v1`), to enable native forwarding independently of Messages routing.
 Verify that endpoint with text, streaming, function calls and tool-result
 continuation before enabling it. Native Responses requests bypass the Messages
@@ -1619,10 +1629,10 @@ src/
   const.py           constants
   dependencies.py    FastAPI DI providers (Depends)
   errors.py          domain exceptions, Anthropic error format
-  api/               /v1/messages, /v1/messages/count_tokens, /health, /dashboard, /metrics, request adapters
-  conversion/        Anthropic <-> OpenAI translation (request/response)
+  api/               Messages, Responses, Images, model discovery, health, dashboard and metrics
+  conversion/        Messages <-> Chat Completions/Responses and Responses ingress/output mappers
   models/            pydantic schemas for Anthropic requests
-  providers/         passthrough, openai-translate, base interface, factory
+  providers/         passthrough, OpenAI translation/native forwarding, Responses bridge
   proxy/             forward-proxy: CONNECT, MITM TLS, certificates, tunnel, HTTP/1.1 session
   routing/           routing.yaml schema, matcher, loader, registry
   services/          headers, reasoning-context cache, message-thread store, token estimation, dashboard monitor
@@ -1634,5 +1644,6 @@ routing.yaml         personal provider/rule registry (gitignored, cp from the ex
 certs/               your own CA bundles for upstream providers (create as needed)
 proxy-ca/            forward-proxy root CA (generated on first run)
 CHANGELOG.md         release notes, one section per version (created by the first /release)
+KICKOFF.md           concise project orientation, setup and limitations
 docs/                README assets (dashboard screenshot)
 ```
