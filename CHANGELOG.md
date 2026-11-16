@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.7.1] - 2026-11-17
+
+### Documentation
+
+- add a concise project kickoff and align Codex routing and setup guidance, including safe configuration copies, Russian documentation and profile reasoning-effort behavior ([#56](https://github.com/kskadart/open-harness-router/pull/56))
+
 ## [0.7.0] - 2026-11-17
 
 ### Added
