@@ -197,14 +197,38 @@ HTTP listener uses a different port. Profiles in this form were verified
 with CLI 0.169.0. Desktop setup and picker behavior must be verified separately;
 the generated profile does not change the desktop's default provider.
 
-Providers with `api_flavor: responses` also support native forwarding using
-their existing `base_url`. Other providers must opt in with
-`responses_base_url`, including the API prefix (usually `/v1`). Only explicit
-model ids from exact rules or `client_models` are listed. Optional `codex`
-metadata controls the display name, client context window, supported/default
-reasoning efforts and input modalities; it does not change upstream limits.
-Native Responses requests bypass the Messages translation settings, including
-`drop_params`, token caps and quota waiting; the upstream enforces its limits.
+Providers with `api_flavor: responses` support native forwarding using their
+existing `base_url`. Set `responses_base_url`, including the API prefix
+(usually `/v1`), to enable native forwarding independently of Messages routing.
+Verify that endpoint with text, streaming, function calls and tool-result
+continuation before enabling it. Native Responses requests bypass the Messages
+translation settings, including `drop_params`, token caps and quota waiting;
+the upstream enforces its limits.
+
+Own-key providers without a native Responses endpoint also support Codex:
+OHR maps Responses to Messages, uses the existing provider pipeline (including
+its Chat Completions conversion when configured), and maps the result back to
+Responses JSON or SSE. This path preserves model aliases, token limits,
+provider credentials, function and freeform tools, namespaces, tool results,
+text/image input, streaming, usage, cancellation and upstream errors. Client
+OpenAI credentials are never forwarded to the Messages adapter. Providers
+requiring a client's Anthropic credentials cannot use this adapter with a
+Codex login; configure an own-key provider or a native Responses endpoint.
+
+Translated requests must carry the full conversation in `input`;
+`previous_response_id`, server conversations, item references, structured output
+and hosted tools other than optional web search are rejected with a 400 error.
+Optional hosted `web_search` definitions are omitted with a router warning and
+an explicit instruction to the model that hosted search is unavailable; forced
+hosted search is rejected. Client-side search tools remain usable. Native
+Responses forwarding keeps its original hosted-tool support.
+
+The model picker includes explicit ids from exact rules or `client_models` for
+both native and translated providers. Regenerate the catalog with
+`make sync-codex-config` (or install it with the command above) and restart
+Codex after changing routes. Optional `codex` metadata controls the display
+name, client context window, supported/default reasoning efforts and input
+modalities; it does not change upstream limits.
 
 For upstreams that only support `apply_patch` as a freeform custom tool,
 `responses_custom_tools_as_functions: [exec]` adapts Codex Code Mode's `exec`

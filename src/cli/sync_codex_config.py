@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from conversion.responses_ingress import can_translate_responses
 from errors import ConfigError
 from routing.config_loader import load_routing_config
 from services.codex_catalog import load_catalog, merge_catalogs, model_catalog
@@ -35,7 +36,9 @@ def main(argv: list[str] | None = None) -> int:
         names = {
             name
             for name, cfg in config.providers.items()
-            if cfg.responses_base_url is not None or cfg.api_flavor == "responses"
+            if cfg.responses_base_url is not None
+            or cfg.api_flavor == "responses"
+            or can_translate_responses(cfg)
         }
         catalog = model_catalog(config.rules, config.providers, names)
         source = args.base_catalog or config.codex_catalog_path
@@ -50,7 +53,8 @@ def main(argv: list[str] | None = None) -> int:
         ids = [model["slug"] for model in catalog["models"]]
         if not ids:
             raise ConfigError(
-                "no native Responses models to advertise; configure responses_base_url "
+                "no Responses models to advertise; configure an own-key provider or "
+                "responses_base_url, "
                 "and client_models (or an exact rule) in routing.yaml"
             )
         model = args.model or ids[0]

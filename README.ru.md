@@ -54,6 +54,12 @@ cp routing.example.yaml routing.yaml    # personal provider registry, not commit
 The router also supports Codex CLI through native `POST /v1/responses`, with
 `GET /codex/models` for its model catalog and `GET /v1/models` for OpenAI-style
 discovery. Kimi Code supports this protocol with the same server-side key.
+Own-key providers without a native Responses endpoint use the Responses ↔ Messages
+adapter and the existing Chat Completions conversion where configured. It supports
+streaming, function/freeform tools, namespaces and tool-result continuation. It
+requires full conversation history; optional hosted web search is unavailable on
+translated routes (client tools still work). Regenerate the catalog and restart
+Codex after changing routes. Native forwarding takes precedence when configured.
 Configure `responses_default` and `codex_catalog_path` to keep all native
 Codex models and custom models together in the same picker.
 The combined native-auth profile preserves the `openai` provider identity

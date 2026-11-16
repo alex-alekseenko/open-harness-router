@@ -9,8 +9,10 @@ from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import Response
 
 from api.adapters import openai_error, to_fastapi_response
+from conversion.responses_ingress import can_translate_responses
 from dependencies import LoggerDep, RegistryDep
 from errors import UpstreamError
+from providers.responses_bridge import handle_translated_responses
 from services.codex_catalog import merge_catalogs, model_catalog
 from services.monitor import Monitor
 
@@ -33,7 +35,8 @@ async def codex_models(registry: RegistryDep) -> dict[str, Any]:
     custom = model_catalog(
         registry.rules,
         {name: provider.cfg for name, provider in registry.providers.items()},
-        set(registry.responses_providers),
+        set(registry.responses_providers)
+        | {name for name, p in registry.providers.items() if can_translate_responses(p.cfg)},
     )
     return merge_catalogs(registry.codex_catalog, custom)
 
@@ -68,24 +71,32 @@ async def create_response(
         return openai_error("'stream' must be a boolean")
     decision = registry.resolve(model, default_provider=registry.responses_default)
     native = registry.responses_providers.get(decision.provider.name)
-    if native is None:
+    if native is None and not can_translate_responses(decision.provider.cfg):
         return openai_error(
             "The selected model's provider does not support native Responses; "
             "configure responses_base_url for a Responses-capable upstream.",
             code="unsupported_model",
         )
-    if decision.upstream_model is not None:
+    if native is not None and decision.upstream_model is not None:
         payload["model"] = decision.upstream_model
         raw_body = json.dumps(payload).encode()
-    logger.info("route", endpoint="responses", model=model, provider=native.name)
+    logger.info("route", endpoint="responses", model=model, provider=decision.provider.name)
     tracker = Monitor.current().start_request(
-        model=model, provider=native.name, endpoint="responses", pricing=decision.pricing,
+        model=model,
+        provider=decision.provider.name,
+        endpoint="responses",
+        pricing=decision.pricing,
         stream=payload.get("stream", False),
     )
     try:
-        result = await native.handle_responses(
-            raw_body, http_request.headers, http_request, query=http_request.url.query
-        )
+        if native is not None:
+            result = await native.handle_responses(
+                raw_body, http_request.headers, http_request, query=http_request.url.query
+            )
+        else:
+            result = await handle_translated_responses(
+                payload, decision.provider, http_request, decision.upstream_model, decision.limits
+            )
     except UpstreamError as exc:
         tracker.fail(exc)
         return openai_error(exc.message, exc.status_code, code=exc.error_type)
