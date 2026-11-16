@@ -190,6 +190,16 @@ h1, h2 { margin: 0; }
 
 .range-error { color: var(--err); }
 
+.tile-link { display: inline-block; margin-top: 8px; font-size: 12px; color: var(--accent); }
+.request-errors { scroll-margin-top: 160px; }
+.error-history-note { font-size: 12px; margin: 0 0 14px; }
+.error-history { max-height: 420px; }
+.errors-table td { vertical-align: top; }
+.errors-table .error-reason { min-width: 280px; max-width: 500px; white-space: normal; }
+.error-reason strong { display: block; margin-bottom: 4px; }
+.error-reason div { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.event-error { font-size: 11px; }
+
 /* ---- layout ---------------------------------------------------------- */
 
 /* Every grid track is minmax(0, 1fr), never a bare 1fr or the implicit auto:
@@ -328,7 +338,7 @@ tr.model-row td:first-child { padding-left: 28px; font-weight: 400; }
 
 /* ---- routing --------------------------------------------------------- */
 
-details.routing > summary {
+details.routing > summary, details.request-errors > summary {
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
@@ -338,7 +348,8 @@ details.routing > summary {
   list-style: revert;
 }
 
-details.routing[open] > summary { margin-bottom: 12px; }
+details.routing[open] > summary, details.request-errors[open] > summary { margin-bottom: 12px; }
+.error-summary-note { margin-left: 8px; font-size: 12px; font-weight: 400; letter-spacing: normal; text-transform: none; }
 .routing-heading { margin: 18px 0 8px; font-size: 13px; font-weight: 600; }
 .routing-note { color: var(--muted); font-size: 12px; margin: 8px 0 12px; }
 .routing-endpoints { font-size: 11px; margin-top: 4px; }

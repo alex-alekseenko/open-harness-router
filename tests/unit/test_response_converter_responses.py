@@ -504,7 +504,7 @@ async def test_usage_from_completed_event_is_reported_in_message_delta() -> None
 
     usage = {
         "input_tokens": 61,
-        "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 1024},
+        "input_tokens_details": {"cache_write_tokens": 10, "cached_tokens": 40},
         "output_tokens": 18,
         "output_tokens_details": {"reasoning_tokens": 12},
         "total_tokens": 79,
@@ -515,9 +515,10 @@ async def test_usage_from_completed_event_is_reported_in_message_delta() -> None
     message_delta = next(payload for name, payload in events if name == "message_delta")
 
     assert message_delta["usage"] == {
-        "input_tokens": 61,
+        "input_tokens": 11,
         "output_tokens": 18,
-        "cache_read_input_tokens": 1024,
+        "cache_read_input_tokens": 40,
+        "cache_creation_input_tokens": 10,
     }
 
 
@@ -725,6 +726,7 @@ def test_convert_responses_nonstreaming_message_returns_text_block() -> None:
         "input_tokens": 23,
         "output_tokens": 10,
         "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
     }
 
 

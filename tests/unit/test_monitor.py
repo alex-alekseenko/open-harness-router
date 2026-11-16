@@ -79,6 +79,29 @@ def test_scanner_reads_native_responses_cache_usage() -> None:
     assert scanner.usage.total() == 110
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_native_cache_writes_are_counted_without_inflating_input(stream: bool) -> None:
+    """Responses writes and reads belong to inclusive input, not extra tokens."""
+    scanner = UsageScanner()
+    payload = {"usage": {
+        "input_tokens": 100, "output_tokens": 10,
+        "input_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 25},
+    }}
+    if stream:
+        wire = _sse("response.completed", {"type": "response.completed", "response": payload})
+        for offset in range(0, len(wire), 7):
+            scanner.feed_sse(wire[offset:offset + 7])
+    else:
+        scanner.feed_json(json.dumps(payload).encode())
+    assert scanner.usage.as_dict() == {
+        "input_tokens": 15, "output_tokens": 10,
+        "cache_creation_input_tokens": 25, "cache_read_input_tokens": 60,
+    }
+    assert scanner.usage.total() == 110
+    scanner.usage.update({"input_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 25}})
+    assert scanner.usage.total() == 110  # partial updates cannot subtract twice
+
+
 def test_scanner_ignores_unparseable_bodies() -> None:
     scanner = UsageScanner()
     scanner.feed_json(b"not json")

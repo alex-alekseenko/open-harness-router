@@ -1323,6 +1323,20 @@ address, MITM allowlist, root CA expiry). The page polls
 `GET /dashboard/state`, which returns the same picture as JSON, so it can
 be read with `curl`/`jq` or scraped by anything else.
 
+Click **View error details** on the Errors tile to expand **Request errors**
+and inspect failures from the selected time range. The section is collapsed by
+default, like Routing; click its heading to expand or collapse it. Direct links
+to `#request-errors` also expand it. **Request errors** shows the latest 100 matching persisted
+requests, including those from previous processes, with time, model, provider,
+endpoint, HTTP status, recorded error type and an explanation. It uses the same
+failure predicate as the tile and excludes deliberate capability rejections.
+HTTP 200 describes the response headers and can coexist with an interrupted or
+failed stream. `CancelledError` records interruption before completion; existing
+rows do not identify whether cancellation, disconnect or shutdown caused it.
+Only request metadata is stored, not prompts, headers or response bodies.
+The separate **Events** feed remains a bounded view of the current process;
+request rows now display their recorded error type as well as HTTP status.
+
 The Routing panel separates the Messages, Codex Responses and Codex Images
 endpoint defaults from the shared model rules. Responses can use a different
 fallback from Messages; Images bypasses model rules and requires the explicitly
@@ -1354,6 +1368,19 @@ What feeds it (`src/services/monitor.py`):
 - the log events worth seeing: what the forward-proxy tunnelled or relayed
   outside the routed paths, retries, context-window clamps and rejects, and
   every warning or error.
+
+The Tokens tile and provider input columns show **total input including cache**;
+output is separate. Internally, ordinary input, cache reads and cache writes are
+disjoint buckets for pricing. OpenAI Responses reports reads and writes under
+`input_tokens_details.cached_tokens` and `cache_write_tokens`; Chat Completions
+uses `prompt_tokens_details`. Anthropic reports `cache_read_input_tokens` and
+`cache_creation_input_tokens` separately from `input_tokens`. OHR observes the
+upstream counters; it does not create the providers' prompt caches itself.
+Missing write counters count as zero in numeric aggregates, so the dashboard
+labels writes as **reported**: zero can mean no reported writes, not necessarily
+no caching. Records captured before cache-write parsing was fixed retain their
+original values; OHR cannot reconstruct missing writes from cache reads or
+uncached input. Likewise, historical translated input counts are not rewritten.
 
 The cost column needs prices: an optional `pricing` block on a provider
 (the default for its rules) or on a rule (that model only), in USD per

@@ -634,9 +634,18 @@ function Tile(props) {
       <div class=${"value" + (props.tone ? " " + props.tone : "")} title=${props.title || ""}>
         ${props.value}
       </div>
-      <div class="sub">${props.sub}</div>
+      <div class="sub" title=${props.subTitle || ""}>${props.sub}</div>
+      ${props.href ? html`<a class="tile-link" href=${props.href}>View error details →</a>` : null}
     </div>
   `;
+}
+
+// Storage keeps disjoint billing buckets; display inclusive prompt totals.
+function promptTokens(usage) {
+  const u = usage || {};
+  return (Number(u.input_tokens) || 0) +
+    (Number(u.cache_read_input_tokens) || 0) +
+    (Number(u.cache_creation_input_tokens) || 0);
 }
 
 function tokensCell(usage) {
@@ -644,8 +653,8 @@ function tokensCell(usage) {
   const cache = (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
   return html`
     <span>
-      ${fmtInt(u.input_tokens)} / ${fmtInt(u.output_tokens)}
-      ${cache ? html`<span class="muted"> +${fmtInt(cache)} cache</span>` : null}
+      ${fmtInt(promptTokens(u))} / ${fmtInt(u.output_tokens)}
+      ${cache ? html`<span class="muted"> (${fmtInt(cache)} cached)</span>` : null}
     </span>
   `;
 }
@@ -658,9 +667,9 @@ function tokenCells(usage) {
   const read = Number(u.cache_read_input_tokens) || 0;
   const write = Number(u.cache_creation_input_tokens) || 0;
   return html`
-    <td class="num" title=${fmtInt(u.input_tokens)}>${fmtCompact(u.input_tokens)}</td>
+    <td class="num" title=${fmtInt(promptTokens(u)) + " total input (including cache)"}>${fmtCompact(promptTokens(u))}</td>
     <td class="num" title=${fmtInt(u.output_tokens)}>${fmtCompact(u.output_tokens)}</td>
-    <td class="num" title=${fmtInt(read) + " read · " + fmtInt(write) + " write"}>
+    <td class="num" title=${fmtInt(read) + " read · " + fmtInt(write) + " reported write"}>
       ${read + write ? fmtCompact(read + write) : html`<span class="muted">—</span>`}
     </td>
   `;
@@ -1158,7 +1167,80 @@ function Header(props) {
   `;
 }
 
-// ---- the activity cards -----------------------------------------------
+// ---- failure details and the activity cards ---------------------------
+
+const isFailedRequest = (event) => event.error != null ||
+  (event.status != null && event.status >= 400 && event.rejected == null);
+
+function errorExplanation(event) {
+  const explanations = {
+    CancelledError: "Stream interrupted before completion: cancellation, client disconnect, or shutdown. The exact cause was not recorded.",
+    GeneratorExit: "Stream closed before completion. The exact cause was not recorded.",
+    StreamNotStarted: "Stream closed before its response body was read.",
+    UpstreamStreamError: "The upstream reported a failure inside the response stream.",
+    ReadTimeout: "Timed out waiting for data from the upstream.",
+    ConnectTimeout: "Timed out connecting to the upstream.",
+    PoolTimeout: "Timed out waiting for an available upstream connection.",
+    UpstreamError: "The upstream request failed. Additional provider details were not stored.",
+  };
+  if (event.error) return explanations[event.error] || "Request failed with the recorded error type.";
+  if (event.status === 429) return "The upstream rate limit was exceeded.";
+  if (event.status === 401 || event.status === 403) return "The upstream rejected authentication or access.";
+  if (event.status >= 500) return "The upstream returned a server error.";
+  return "The upstream rejected the request. Response body details were not stored.";
+}
+
+function RequestErrors({ state, history }) {
+  const panel = useRef(null);
+  useEffect(() => {
+    const revealHash = () => {
+      if (window.location.hash === "#request-errors") panel.current.open = true;
+    };
+    const revealLink = (event) => {
+      // A second click on the same anchor does not emit hashchange.
+      if (event.target instanceof Element && event.target.closest('a[href="#request-errors"]')) {
+        panel.current.open = true;
+      }
+    };
+    revealHash();
+    window.addEventListener("hashchange", revealHash);
+    document.addEventListener("click", revealLink);
+    return () => {
+      window.removeEventListener("hashchange", revealHash);
+      document.removeEventListener("click", revealLink);
+    };
+  }, []);
+  const persisted = history && Array.isArray(history.error_events);
+  const events = persisted ? history.error_events
+    : (state.events || []).filter((event) => event.kind === "request" && isFailedRequest(event));
+  const total = Number(((history && history.totals) || state.totals || {}).errors) || 0;
+  return html`
+    <details class="card request-errors" id="request-errors" ref=${panel}>
+      <summary>Request errors
+        <span class="error-summary-note">${fmtInt(total)} · ${persisted ? "selected range" : "since restart"}</span>
+      </summary>
+      ${events.length ? html`
+        <p class="error-history-note muted">Showing ${events.length} of ${fmtInt(total)} errors.
+          HTTP 200 can still have an interrupted or failed response stream.</p>
+        <div class="scroll error-history">
+          <table class="errors-table">
+            <thead><tr><th>Time</th><th>Model / provider</th><th>Endpoint</th><th>HTTP</th><th>Reason</th><th class="num">Duration</th></tr></thead>
+            <tbody>${events.map((event, index) => html`
+              <tr key=${String(event.id || event.ts) + ":" + index}>
+                <td class="mono" title=${event.ts}>${fmtLocalDateTime(event.ts)}<div class="muted">${fmtTime(event.ts)}</div></td>
+                <td class="mono">${event.model || "—"}<div class="muted">${event.provider || "—"}</div></td>
+                <td class="mono">${event.endpoint || "—"}<div class="muted">${event.stream ? "stream" : "unary"}</div></td>
+                <td class="mono">${event.status == null ? "No response" : event.status}</td>
+                <td class="error-reason"><strong class="err">${event.error || "HTTP " + event.status}</strong><div>${errorExplanation(event)}</div></td>
+                <td class="num">${fmtMs(event.duration_ms)}</td>
+              </tr>
+            `)}</tbody>
+          </table>
+        </div>
+      ` : html`<div class="empty">${total ? "No error details are available in the current event buffer." : "No request errors in this range."}</div>`}
+    </details>
+  `;
+}
 
 function Activity(props) {
   const state = props.state || {};
@@ -1240,7 +1322,7 @@ function Activity(props) {
 function renderEvent(event, index) {
   const isRequest = event.kind === "request";
   const failed = isRequest
-    ? event.error != null || (event.status != null && event.status >= 400)
+    ? isFailedRequest(event)
     : levelClass(event.level) === "err";
   const what = isRequest
     ? event.endpoint + " " + (event.status == null ? "failed" : event.status) + (event.stream ? " stream" : "")
@@ -1252,14 +1334,16 @@ function renderEvent(event, index) {
         .join(" ");
   return html`
     <tr key=${String(event.ts) + ":" + index} class=${failed ? "event-failed" : ""}>
-      <td class="mono muted">${fmtTime(event.ts)}</td>
+      <td class="mono muted" title=${event.ts}>${fmtTime(event.ts)}</td>
       <td class="mono">
         ${isRequest ? event.model : what}
+        ${isRequest ? html`<div class="muted">${event.endpoint}${event.stream ? " · stream" : ""}</div>` : null}
         ${details ? html`<span class="muted"> ${details}</span>` : null}
       </td>
       <td class="mono">${isRequest ? event.provider : ""}</td>
       <td class=${isRequest ? (failed ? "err" : "ok") : levelClass(event.level)}>
         ${isRequest ? (event.status == null ? "failed" : event.status) : event.level}
+        ${isRequest && event.error ? html`<div class="event-error">${event.error}</div>` : null}
       </td>
       <td class="num">${event.duration_ms != null ? fmtMs(event.duration_ms) : ""}</td>
       <td class="num">${isRequest ? tokensCell(event.usage) : ""}</td>
@@ -1414,7 +1498,7 @@ function App() {
   // The window lives in the URL, so a reload (and a link) keep it.
   useEffect(() => {
     try {
-      window.history.replaceState(null, "", window.location.pathname + viewQuery(view));
+      window.history.replaceState(null, "", window.location.pathname + viewQuery(view) + window.location.hash);
     } catch (e) {
       /* the history API is not always available */
     }
@@ -1545,6 +1629,7 @@ function App() {
           tone=${errors ? "err" : ""}
           title=${fmtInt(errors)}
           sub=${"error rate " + errorRate}
+          href=${errors ? "#request-errors" : null}
         />
         <${Tile}
           label="In flight"
@@ -1554,9 +1639,10 @@ function App() {
         />
         <${Tile}
           label="Tokens"
-          value=${fmtCompact(usage.input_tokens) + " / " + fmtCompact(usage.output_tokens)}
-          title=${fmtInt(usage.input_tokens) + " in / " + fmtInt(usage.output_tokens) + " out"}
-          sub=${fmtCompact(cacheRead) + " read · " + fmtCompact(cacheWrite) + " write"}
+          value=${fmtCompact(promptTokens(usage)) + " / " + fmtCompact(usage.output_tokens)}
+          title=${fmtInt(promptTokens(usage)) + " total input (including cache) / " + fmtInt(usage.output_tokens) + " output"}
+          sub=${fmtCompact(cacheRead) + " cache read · " + fmtCompact(cacheWrite) + " reported write"}
+          subTitle="Provider-reported cache usage. Missing write counters and older records count as zero; zero does not establish that no cache was written. Input above includes cache reads and writes."
         />
         <${Tile}
           label="Cost"
@@ -1591,6 +1677,7 @@ function App() {
         toggle=${toggleProvider}
         note=${providerNote}
       />
+      <${RequestErrors} state=${state || {}} history=${history} />
       <${Activity} state=${state} />
       <${Routing} state=${state} />
     </main>

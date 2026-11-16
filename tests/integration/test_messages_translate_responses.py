@@ -107,9 +107,11 @@ _OPENAI_CHAT_RESPONSE = {
 def _anthropic_usage(usage: dict[str, Any]) -> dict[str, int]:
     """Expected Anthropic usage for a Responses API usage object."""
     return {
-        "input_tokens": usage["input_tokens"],
+        "input_tokens": (usage["input_tokens"] - usage["input_tokens_details"]["cached_tokens"]
+                         - usage["input_tokens_details"]["cache_write_tokens"]),
         "output_tokens": usage["output_tokens"],
         "cache_read_input_tokens": usage["input_tokens_details"]["cached_tokens"],
+        "cache_creation_input_tokens": usage["input_tokens_details"]["cache_write_tokens"],
     }
 
 

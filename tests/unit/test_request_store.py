@@ -133,6 +133,47 @@ async def test_a_rejected_row_is_not_an_error(store: RequestStore) -> None:
     assert totals["errors"] == 2
 
 
+async def test_error_events_survive_reopen_and_match_range_totals(tmp_path: Path) -> None:
+    path = tmp_path / "errors.db"
+    store = RequestStore(db_path=path, retention_days=365, window_days=30)
+    start = _now()
+    end = start + timedelta(minutes=5)
+    for timestamp, fields in [
+        (start - timedelta(seconds=1), {"error": "Outside"}),
+        (start, {"status": 200, "error": "CancelledError", "stream": True}),
+        (start + timedelta(minutes=1), {"status": 429}),
+        (start + timedelta(minutes=2), {"status": 200}),
+        (start + timedelta(minutes=3), {"status": 400, "rejected": "thread_continue"}),
+        (end, {"error": "Outside"}),
+    ]:
+        store.record(_entry(timestamp.isoformat(), model="m", provider="p", **fields))
+    await store.aclose()
+    reopened = RequestStore(db_path=path, retention_days=365, window_days=30)
+    try:
+        events = await reopened.error_events(start=start.isoformat(), end=end.isoformat())
+        totals = await reopened.range_totals(start=start.isoformat(), end=end.isoformat())
+        assert len(events) == totals["errors"] == 2
+        assert [event["status"] for event in events] == [429, 200]
+        assert events[1]["error"] == "CancelledError"
+        assert events[1]["stream"] is True
+        assert events[0]["model"] == "m"
+        assert events[0]["provider"] == "p"
+        assert all(event["kind"] == "request" and event["level"] == "error" for event in events)
+    finally:
+        await reopened.aclose()
+
+
+async def test_error_history_is_bounded_with_stable_newest_first_order(store: RequestStore) -> None:
+    timestamp = _now().isoformat()
+    for index in range(105):
+        store.record(_entry(timestamp, error="CancelledError", model=f"m{index}"))
+    events = await store.error_events(start=timestamp, end=None)
+    assert len(events) == 100
+    assert events[0]["model"] == "m104"
+    assert events[-1]["model"] == "m5"
+    assert [row["id"] for row in events] == sorted((row["id"] for row in events), reverse=True)
+
+
 async def test_daily_series_groups_by_utc_day_oldest_first(store: RequestStore) -> None:
     day_one = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
     day_two = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S+00:00")

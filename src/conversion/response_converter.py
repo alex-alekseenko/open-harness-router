@@ -21,6 +21,7 @@ import httpx
 from openai import APIError
 
 from const import Constants
+from conversion.usage import normalize_openai_usage
 
 # Building the error frame lives in errors: the same frame closes the
 # passthrough stream, which does not depend on the conversion layer. The
@@ -100,12 +101,7 @@ def convert_openai_to_claude_response(
         "content": content_blocks,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": openai_response.get("usage", {}).get("prompt_tokens", 0),
-            "output_tokens": openai_response.get("usage", {}).get(
-                "completion_tokens", 0
-            ),
-        },
+        "usage": _chat_usage(openai_response.get("usage")),
     }
 
     return claude_response  # noqa: RET504
@@ -183,17 +179,7 @@ async def convert_openai_streaming_to_claude_with_cancellation(  # noqa: PLR0912
                         upstream_model = chunk.get("model") or upstream_model
                         usage = chunk.get("usage", None)
                         if usage:
-                            cache_read_input_tokens = 0
-                            prompt_tokens_details = usage.get("prompt_tokens_details", {})
-                            if prompt_tokens_details:
-                                cache_read_input_tokens = prompt_tokens_details.get(
-                                    "cached_tokens", 0
-                                )
-                            usage_data = {
-                                "input_tokens": usage.get("prompt_tokens", 0),
-                                "output_tokens": usage.get("completion_tokens", 0),
-                                "cache_read_input_tokens": cache_read_input_tokens,
-                            }
+                            usage_data = _chat_usage(usage)
                         choices = chunk.get("choices", [])
                         if not choices:
                             continue
@@ -398,6 +384,15 @@ _RESPONSES_TERMINAL_EVENTS: frozenset[str] = frozenset({
 _RESPONSES_FAILED_STATUS_CODE = 502
 
 
+def _chat_usage(usage: dict[str, Any] | None) -> dict[str, int]:
+    """Read Chat Completions usage without counting cached input twice."""
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        **normalize_openai_usage(usage or {}, chat=True),
+    }
+
+
 def _responses_usage(usage: dict[str, Any] | None) -> dict[str, int]:
     """Extract the Responses API response usage into Anthropic format.
 
@@ -417,11 +412,11 @@ def _responses_usage(usage: dict[str, Any] | None) -> dict[str, int]:
     if not usage:
         return {"input_tokens": 0, "output_tokens": 0}
 
-    input_details = usage.get("input_tokens_details") or {}
     return {
-        "input_tokens": usage.get("input_tokens", 0),
-        "output_tokens": usage.get("output_tokens", 0),
-        "cache_read_input_tokens": input_details.get("cached_tokens", 0),
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        **normalize_openai_usage(usage),
     }
 
 

@@ -248,6 +248,7 @@ async def _history(
             "clamped": resolved.clamped,
         },
         "totals": totals,
+        "error_events": await store.error_events(start=resolved.start, end=resolved.end),
         "series": series,
         "providers": grouped["providers"],
         "models": grouped["models"],

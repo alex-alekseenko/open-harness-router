@@ -45,6 +45,7 @@ from const import (
     MONITOR_EVENT_TEXT_LIMIT,
     MONITOR_SSE_LINE_LIMIT,
 )
+from conversion.usage import normalize_openai_usage
 from providers.base import ProviderResult
 from routing.schema import PricingCfg
 
@@ -147,13 +148,12 @@ class Usage:
             value = payload.get(name)
             if isinstance(value, int) and not isinstance(value, bool):
                 setattr(self, name, value)
-        # Responses input_tokens includes cached input; the dashboard's input
-        # bucket is uncached, with cache reads priced separately.
-        details = payload.get("input_tokens_details")
-        cached = details.get("cached_tokens") if isinstance(details, dict) else None
-        if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
-            self.cache_read_input_tokens = min(cached, self.input_tokens)
-            self.input_tokens -= self.cache_read_input_tokens
+        # Native Responses reports inclusive input; Anthropic buckets are
+        # disjoint. Only normalize a new input total, never subtract twice
+        # when a partial SSE update carries details without that total.
+        if isinstance(payload.get("input_tokens_details"), dict):
+            for name, value in normalize_openai_usage(payload).items():
+                setattr(self, name, value)
 
     def add(self, other: Usage) -> None:
         """Accumulate another response's counts into this one."""
