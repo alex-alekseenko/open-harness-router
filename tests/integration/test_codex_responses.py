@@ -320,12 +320,17 @@ async def test_stream_failure_uses_openai_error_shape_and_releases_upstream(
     assert stream.closed
 
 
+@pytest.mark.parametrize("cache_write", [0, 3])
 async def test_native_stream_preserves_wire_events_and_usage(
-    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock
+    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock, cache_write: int,
 ) -> None:
+    upstream_response = {**_RESPONSE, "usage": {
+        **_RESPONSE["usage"],
+        "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": cache_write},
+    }}
     events = [
         {"type": "response.output_text.delta", "delta": "OK"},
-        {"type": "response.completed", "response": _RESPONSE},
+        {"type": "response.completed", "response": upstream_response},
     ]
     wire = b"".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in events)
     httpx_mock.add_response(
@@ -338,8 +343,9 @@ async def test_native_stream_preserves_wire_events_and_usage(
     )
     assert response.content == wire
     snapshot = Monitor.current().snapshot()
-    assert snapshot["totals"]["usage"]["input_tokens"] == 8
+    assert snapshot["totals"]["usage"]["input_tokens"] == 8 - cache_write
     assert snapshot["totals"]["usage"]["cache_read_input_tokens"] == 4
+    assert snapshot["totals"]["usage"]["cache_creation_input_tokens"] == cache_write
     assert snapshot["totals"]["usage"]["output_tokens"] == 2
 
 

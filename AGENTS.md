@@ -65,6 +65,14 @@ Validate offline before restarting a configured service. Development checks
 should use an isolated port and temporary state so they do not disrupt the
 router serving existing sessions.
 
+After successfully publishing a release, restart the running local router as
+part of the release workflow without asking for another confirmation. Wait for
+active requests to finish before restarting. Use
+`.claude/skills/add-provider/scripts/restart_router.sh`, then verify `/health`
+and that `/dashboard/state` reports the released version with
+`restart_required: false`. This project rule overrides the release skill's
+default instruction not to restart the router.
+
 ## Existing Claude workflows
 
 The repo has no project `CLAUDE.md`. Its reusable workflows are currently in

@@ -347,6 +347,37 @@ async def test_dashboard_static_refuses_a_traversal(
     assert response.status_code == 404
 
 
+async def test_dashboard_error_details_follow_the_selected_range_without_live_events(
+    client: httpx.AsyncClient, tmp_path: Path,
+) -> None:
+    store = RequestStore(db_path=tmp_path / "errors.db", retention_days=365, window_days=30)
+    now = datetime.now(UTC)
+    store.record({
+        "ts": (now - timedelta(minutes=7)).isoformat(), "kind": "request",
+        "endpoint": "responses", "status": 200, "error": "CancelledError", "stream": True,
+    })
+    store.record({
+        "ts": (now - timedelta(minutes=2)).isoformat(), "kind": "request", "status": 429,
+    })
+    Monitor.current().attach_store(store)
+    try:
+        for window, expected in [("5m", 1), ("30m", 2)]:
+            response = await client.get("/dashboard/state", params={"window": window})
+            assert response.status_code == 200
+            state = response.json()
+            assert state["events"] == []
+            history = state["history"]
+            assert len(history["error_events"]) == history["totals"]["errors"] == expected
+            assert history["error_events"][0]["status"] == 429
+        interrupted = history["error_events"][1]
+        assert interrupted["error"] == "CancelledError"
+        assert interrupted["status"] == 200
+        assert interrupted["stream"] is True
+    finally:
+        Monitor.current().attach_store(None)
+        await store.aclose()
+
+
 async def test_dashboard_state_answers_a_custom_range(
     client: httpx.AsyncClient, tmp_path: Path
 ) -> None:

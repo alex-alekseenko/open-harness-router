@@ -697,6 +697,30 @@ class RequestStore:
         )
         return self._totals_from_row(rows[0] if rows else None)
 
+    async def error_events(self, *, start: str, end: str | None) -> list[dict[str, Any]]:
+        """Read the latest 100 failures in the same range and with the same
+        predicate as the Errors tile, including rows from previous processes.
+
+        Only stored request metadata is returned; no prompts, bodies or headers.
+        """
+        where, params = _range_where(start, end)
+        columns = (
+            "id", "ts", "request_id", "endpoint", "model", "provider", "status",
+            "error", "stream", "duration_ms",
+        )
+        rows = await asyncio.to_thread(
+            self._query,
+            f"SELECT {', '.join(columns)} FROM request_log "
+            f"WHERE {where} AND {_ERROR_CONDITION} ORDER BY ts DESC, id DESC LIMIT 100",
+            params,
+        )
+        events = []
+        for row in rows:
+            event = dict(zip(columns, row, strict=True))
+            event.update(kind="request", level="error", stream=bool(event["stream"]))
+            events.append(event)
+        return events
+
     async def grouped_totals(self, *, start: str, end: str | None) -> dict[str, dict[str, Any]]:
         """Aggregate the counters per provider and per model over a range.
 
