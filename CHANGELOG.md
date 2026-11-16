@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.6.2] - 2026-11-16
+
+### Fixed
+
+- persist error details and correct cache token accounting ([#52](https://github.com/kskadart/open-harness-router/pull/52))
+
 ## [0.6.1] - 2026-11-16
 
 ### Fixed
