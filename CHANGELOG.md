@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.7.0] - 2026-11-17
+
+### Added
+
+- add Responses adapters for custom Codex models backed by Messages or Chat Completions, with streaming, function/freeform tools, tool-result continuation, credential isolation and combined model discovery ([#54](https://github.com/kskadart/open-harness-router/pull/54))
+
 ## [0.6.2] - 2026-11-16
 
 ### Fixed
