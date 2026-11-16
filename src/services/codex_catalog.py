@@ -84,8 +84,9 @@ def model_catalog(
     providers: dict[str, ProviderCfg],
     responses_provider_names: set[str],
 ) -> dict[str, Any]:
-    """List explicit model ids whose first matching rule supports Responses.
+    """List explicit model ids whose first matching rule can serve Responses.
 
+    ``responses_provider_names`` includes native transports and Messages adapters.
     ``providers`` maps names to ``ProviderCfg`` objects. A prefix is never
     guessed into a model id; list its concrete ids in ``client_models``.
     """
