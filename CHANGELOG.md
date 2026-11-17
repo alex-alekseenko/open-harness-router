@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.8.0] - 2026-11-17
+
+### Added
+
+- refresh OpenAI subscription models and preserve native Anthropic discovery, and add an isolated Claude Code profile for own-key models with `--gateway-only` and the `cld` launcher ([#59](https://github.com/kskadart/open-harness-router/pull/59))
+
 ## [0.7.1] - 2026-11-17
 
 ### Documentation
