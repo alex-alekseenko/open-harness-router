@@ -286,6 +286,54 @@ def test_collect_model_options_lists_client_models_and_exact_values_in_rule_orde
     assert options == _EXPECTED_OPTIONS
 
 
+def test_gateway_only_advertises_own_key_models_and_preserves_saved_choice(
+    fleet_routing: Path,
+    settings_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cli.sync_client_config.GATEWAY_SETTINGS_PATH", settings_path)
+    monkeypatch.setenv("ROUTER_SERVER_HOST", "::1")
+    monkeypatch.setenv("ROUTER_SERVER_PORT", "18787")
+    settings_path.write_text(json.dumps({
+        "model": "fleet-minimax",
+        "env": {"ANTHROPIC_DEFAULT_HAIKU_MODEL": "fleet-minimax"},
+    }))
+
+    assert main(["--gateway-only"]) == EXIT_OK
+    document = json.loads(settings_path.read_text())
+    assert document["modelPicker"] == {
+        "options": _EXPECTED_OPTIONS,
+        "replaceBuiltInOptions": True,
+    }
+    assert document["model"] == "fleet-minimax"
+    assert document["env"]["ANTHROPIC_BASE_URL"] == "http://[::1]:18787"
+    assert document["env"]["ANTHROPIC_DEFAULT_MODEL"] == "vendor/GLM-Test"
+    assert document["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "fleet-minimax"
+    assert document["env"]["ANTHROPIC_AUTH_TOKEN"] == "ohr-local"
+    assert main(["--gateway-only", "--check"]) == EXIT_OK
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0"])
+def test_gateway_only_refuses_unusable_configuration(
+    host: str,
+    write_routing: Callable[[dict[str, Any]], Path],
+    settings_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("ROUTER_SERVER_HOST", host)
+    if host == "127.0.0.1":
+        write_routing(_clone_passthrough_routing())
+        reason = "at least one own-key model"
+    else:
+        write_routing(_clone_routing())
+        reason = "loopback router listener"
+
+    assert main(["--gateway-only", "--settings-path", str(settings_path)]) == EXIT_CONFIG_ERROR
+    assert reason in capsys.readouterr().err
+    assert not settings_path.exists()
+
+
 def test_collect_model_options_skips_rules_serving_a_passthrough_provider(
     fleet_routing: Path,
 ) -> None:

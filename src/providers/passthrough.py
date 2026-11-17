@@ -63,6 +63,7 @@ def _with_query(path: str, query: str) -> str:
     """
     return f"{path}?{query}" if query else path
 
+
 # Statuses for upstream transport failures: the client sees a gateway error
 # rather than a router 500, and can tell upstream unavailability apart from
 # timeout exhaustion by the status code.
@@ -323,7 +324,7 @@ class PassthroughProvider:
         return await self._proxy_unary(path, raw_body, fwd)
 
     async def _proxy_unary(
-        self, path: str, raw_body: bytes, fwd: dict[str, str]
+        self, path: str, raw_body: bytes, fwd: dict[str, str], *, method: str = "POST"
     ) -> ProviderResult:
         """Proxy a regular (non-streaming) request, relaying the body as received.
 
@@ -341,9 +342,7 @@ class PassthroughProvider:
         try:
             upstream = await self._send_with_retry(
                 lambda: self._client.send(
-                    self._client.build_request(
-                        "POST", path, content=raw_body, headers=fwd
-                    ),
+                    self._client.build_request(method, path, content=raw_body, headers=fwd),
                     stream=True,
                 )
             )
@@ -388,9 +387,7 @@ class PassthroughProvider:
             # single-use, its body cannot be sent twice.
             upstream = await self._send_with_retry(
                 lambda: self._client.send(
-                    self._client.build_request(
-                        "POST", path, content=raw_body, headers=fwd
-                    ),
+                    self._client.build_request("POST", path, content=raw_body, headers=fwd),
                     stream=True,
                 )
             )
@@ -443,6 +440,22 @@ class PassthroughProvider:
     def _stream_error_frame(self) -> bytes:
         """Return an error frame in the client protocol after headers were sent."""
         return stream_error_event(_BAD_GATEWAY, UPSTREAM_STREAM_INTERRUPTED_MESSAGE).encode()
+
+    async def handle_models(
+        self,
+        client_headers: Mapping[str, str],
+        *,
+        query: str = "",
+    ) -> ProviderResult:
+        """Forward native Anthropic discovery, including pagination and account auth."""
+        if not self.cfg.forward_client_auth:
+            raise UpstreamError("Native Messages discovery requires client authentication", 400)
+        return await self._proxy_unary(
+            _with_query("/v1/models", query),
+            b"",
+            self._build_headers(client_headers),
+            method="GET",
+        )
 
     async def handle_messages(
         self,

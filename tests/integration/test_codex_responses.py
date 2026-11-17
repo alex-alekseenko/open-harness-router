@@ -585,3 +585,173 @@ async def test_native_image_transport_failure_finishes_the_tracker(
     snapshot = Monitor.current().snapshot()
     assert snapshot["active"] == []
     assert snapshot["totals"]["errors"] == 1
+
+@pytest.mark.parametrize("codex_client", [True], indirect=True)
+async def test_native_discovery_refreshes_removals_metadata_and_account_scope(
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    url = "https://chatgpt.com/backend-api/codex/models?client_version=0.169.0"
+    first = {**_NATIVE_MODEL, "slug": "gpt-new", "context_window": 999999}
+    second = {**_NATIVE_MODEL, "slug": "gpt-next"}
+    httpx_mock.add_response(url=url, json={"models": [first], "protocol_extension": "kept"})
+    httpx_mock.add_response(url=url, json={"models": [second]})
+    for token, account, expected in [
+        ("account-a-token", "a", first),
+        ("account-b-token", "b", second),
+    ]:
+        response = await codex_client.get(
+            "/v1/models?client_version=0.169.0",
+            headers={
+                "authorization": f"Bearer {token}",
+                "chatgpt-account-id": account,
+                "if-none-match": "upstream-old-etag",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        models = response.json()["models"]
+        assert models[0] == expected
+        assert [m["slug"] for m in models] == [
+            expected["slug"],
+            "kimi-for-coding",
+            "reasoning-alias",
+        ]
+        if account == "a":
+            assert response.json()["protocol_extension"] == "kept"
+    requests = httpx_mock.get_requests()
+    assert [r.headers["authorization"] for r in requests] == [
+        "Bearer account-a-token",
+        "Bearer account-b-token",
+    ]
+    assert [r.headers["chatgpt-account-id"] for r in requests] == ["a", "b"]
+    assert all("if-none-match" not in r.headers for r in requests)
+    # No account-specific result is stored in the unauthenticated bootstrap catalog.
+    local = (await codex_client.get("/codex/models")).json()["models"]
+    assert local[0] == _NATIVE_MODEL
+
+
+@pytest.mark.parametrize("codex_client", [True], indirect=True)
+async def test_local_catalog_reload_does_not_require_router_restart(
+    codex_client: httpx.AsyncClient,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "native-models.json"
+    fresh = {**_NATIVE_MODEL, "slug": "gpt-local-new"}
+    path.write_text(json.dumps({"models": [fresh]}))
+    assert (await codex_client.get("/codex/models")).json()["models"][0] == fresh
+    path.write_text("partial update")
+    assert (await codex_client.get("/codex/models")).json()["models"][0] == fresh
+    newer = {**_NATIVE_MODEL, "slug": "gpt-local-next"}
+    path.write_text(json.dumps({"models": [newer]}))
+    assert (await codex_client.get("/codex/models")).json()["models"][0] == newer
+
+
+@pytest.mark.parametrize("codex_client", [True], indirect=True)
+@pytest.mark.parametrize(
+    "status,payload",
+    [
+        (401, {"error": "expired"}),
+        (503, {"error": "unavailable"}),
+        (200, {"data": [{"id": "standard-api-model"}]}),
+    ],
+)
+async def test_native_discovery_errors_do_not_return_stale_account_data(
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+    status: int,
+    payload: dict[str, Any],
+) -> None:
+    httpx_mock.add_response(
+        url="https://chatgpt.com/backend-api/codex/models?client_version=0.169.0",
+        status_code=status,
+        json=payload,
+    )
+    response = await codex_client.get(
+        "/v1/models?client_version=0.169.0",
+        headers={
+            "authorization": "Bearer caller-token",
+        },
+    )
+    assert response.status_code == (502 if status == 200 else status)
+    assert "error" in response.json()
+    assert "models" not in response.json()
+
+
+@pytest.mark.parametrize("codex_client", ["own-key"], indirect=True)
+async def test_discovery_never_sends_native_credentials_to_own_key_fallback(
+    codex_client: httpx.AsyncClient,
+) -> None:
+    response = await codex_client.get(
+        "/v1/models?client_version=0.169.0",
+        headers={
+            "authorization": "Bearer account-secret",
+            "chatgpt-account-id": "private-account",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["models"][0] == _NATIVE_MODEL
+
+
+async def test_anthropic_discovery_preserves_format_auth_and_pagination(
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    catalogs = [
+        {
+            "data": [{"id": "claude-old", "type": "model", "display_name": "Old"}],
+            "has_more": True,
+            "first_id": "claude-old",
+            "last_id": "claude-old",
+        },
+        {
+            "data": [{"id": "claude-new", "type": "model", "display_name": "New"}],
+            "has_more": False,
+            "first_id": "claude-new",
+            "last_id": "claude-new",
+        },
+    ]
+    for catalog in catalogs:
+        httpx_mock.add_response(
+            method="GET", url="https://api.anthropic.com/v1/models?limit=100", json=catalog
+        )
+        response = await codex_client.get(
+            "/v1/models?limit=100",
+            headers={
+                "anthropic-version": "2023-06-01",
+                "authorization": "Bearer native-claude-login",
+                "anthropic-beta": "test-beta",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json() == catalog
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    assert all(r.headers["authorization"] == "Bearer native-claude-login" for r in requests)
+    assert all(r.headers["anthropic-version"] == "2023-06-01" for r in requests)
+    assert all(r.headers["anthropic-beta"] == "test-beta" for r in requests)
+
+
+async def test_anthropic_discovery_preserves_upstream_errors(
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    error = {"type": "error", "error": {"type": "authentication_error", "message": "Expired"}}
+    httpx_mock.add_response(
+        method="GET", url="https://api.anthropic.com/v1/models", status_code=401, json=error
+    )
+    response = await codex_client.get("/v1/models", headers={"anthropic-version": "2023-06-01"})
+    assert response.status_code == 401
+    assert response.json() == error
+
+
+@pytest.mark.parametrize("codex_client", [True], indirect=True)
+async def test_standard_list_does_not_forward_unspecified_client_credentials(
+    codex_client: httpx.AsyncClient,
+) -> None:
+    response = await codex_client.get(
+        "/v1/models", headers={"authorization": "Bearer arbitrary-key"}
+    )
+    assert response.status_code == 200
+    assert response.json()["object"] == "list"
+    assert response.json()["data"][0]["id"] == "gpt-native"

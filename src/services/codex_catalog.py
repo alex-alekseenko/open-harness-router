@@ -23,15 +23,20 @@ def load_catalog(path: Path) -> dict[str, Any]:
         payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"cannot read Codex model catalog {path}: {exc}") from exc
+    return {"models": validate_catalog(payload)["models"]}
+
+
+def validate_catalog(payload: Any) -> dict[str, Any]:
+    """Validate native discovery without stripping upstream protocol metadata."""
     if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
-        raise ConfigError(f"Codex model catalog {path} must contain a models array")
+        raise ConfigError("Codex catalog must contain a models array")
     seen: set[str] = set()
     for entry in payload["models"]:
         slug = entry.get("slug") if isinstance(entry, dict) else None
         if not isinstance(slug, str) or not slug or slug in seen:
-            raise ConfigError(f"Codex model catalog {path} has a missing or duplicate model slug")
+            raise ConfigError("Codex catalog has a missing or duplicate model slug")
         seen.add(slug)
-    return {"models": payload["models"]}
+    return payload
 
 
 def merge_catalogs(base: dict[str, Any], custom: dict[str, Any]) -> dict[str, Any]:
@@ -76,7 +81,7 @@ def merge_catalogs(base: dict[str, Any], custom: dict[str, Any]) -> dict[str, An
                 "base_instructions": instructions,
             }
         )
-    return {"models": models}
+    return {**base, "models": models}
 
 
 def model_catalog(

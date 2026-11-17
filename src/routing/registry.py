@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from errors import ConfigError
 from log import get_logger
 from providers.base import Provider
 from providers.factory import build_provider, build_responses_provider
@@ -58,6 +60,7 @@ class ProviderRegistry:
         responses_providers: dict[str, NativeOpenAIProvider] | None = None,
         responses_default: str | None = None,
         codex_catalog: dict[str, Any] | None = None,
+        codex_catalog_path: Path | None = None,
     ) -> None:
         """Initialize the registry.
 
@@ -76,6 +79,7 @@ class ProviderRegistry:
         self.responses_providers = responses_providers or {}
         self.responses_default = responses_default
         self.codex_catalog = codex_catalog or {"models": []}
+        self.codex_catalog_path = codex_catalog_path
 
     @classmethod
     def build(cls, config: RoutingConfig, settings: Settings) -> ProviderRegistry:
@@ -104,7 +108,17 @@ class ProviderRegistry:
             responses_providers,
             config.responses_default.provider if config.responses_default else None,
             catalog,
+            config.codex_catalog_path,
         )
+
+    def current_codex_catalog(self) -> dict[str, Any]:
+        """Reload the local bootstrap catalog; retain the last valid one on rotation errors."""
+        if self.codex_catalog_path is not None:
+            try:
+                self.codex_catalog = load_catalog(self.codex_catalog_path)
+            except ConfigError:
+                logger.warning("codex_catalog_reload_failed", source="configured_file")
+        return self.codex_catalog
 
     def resolve(self, model: str, *, default_provider: str | None = None) -> RouteDecision:
         """Resolve the route for a model name.

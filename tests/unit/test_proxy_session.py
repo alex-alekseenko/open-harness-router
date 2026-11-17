@@ -1208,3 +1208,54 @@ async def test_routed_request_is_tracked_by_the_monitor(
     }
     assert snapshot["events"][0]["endpoint"] == "messages"
     task.cancel()
+
+
+async def test_native_model_discovery_is_forwarded_without_provider_routing(
+    connect_streams: StreamFactory,
+    tmp_path: Path,
+) -> None:
+    """CONNECT discovery retains native models, pagination and account headers."""
+    ca_dir = tmp_path / "ca"
+    context = build_leaf_tls_context(CertificateAuthority(ca_dir), _UPSTREAM_HOST)
+    client_context = build_upstream_tls_context(ca_dir / "rootCA.pem")
+    captured: list[bytes] = []
+    payload = b'{"data":[{"id":"claude-new","type":"model"}],"has_more":false}'
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        captured.append(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: "
+            + str(len(payload)).encode()
+            + b"\r\nconnection: close\r\n\r\n"
+            + payload
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=context)
+    streams = await connect_streams()
+    provider = StubProvider()
+    task = _start_session(
+        streams,
+        _registry(provider),
+        target=ConnectRequest(host=_UPSTREAM_HOST, port=server.sockets[0].getsockname()[1]),
+        upstream_tls=client_context,
+    )
+    try:
+        streams.left_writer.write(
+            b"GET /v1/models?limit=100&after_id=previous HTTP/1.1\r\nhost: localhost\r\n"
+            b"authorization: Bearer native-login\r\nanthropic-version: 2023-06-01\r\n\r\n"
+        )
+        await streams.left_writer.drain()
+        response, body = await _read_response(streams, h11.Connection(h11.CLIENT))
+        assert response.status_code == 200
+        assert body == payload
+        assert b"GET /v1/models?limit=100&after_id=previous " in captured[0]
+        assert b"authorization: Bearer native-login" in captured[0]
+        assert b"anthropic-version: 2023-06-01" in captured[0]
+        assert provider.seen_headers == {}
+    finally:
+        task.cancel()
+        server.close()
+        await server.wait_closed()
