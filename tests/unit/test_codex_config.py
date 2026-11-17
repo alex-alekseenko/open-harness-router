@@ -162,3 +162,54 @@ def test_custom_identity_does_not_inherit_native_gpt_identity(native_messages: o
     assert item["base_instructions"] == prompt
     if native_messages is not None:
         assert "Keep existing coding rules." in prompt
+
+
+@pytest.mark.parametrize(
+    "native_url,live",
+    [
+        ("https://chatgpt.com/backend-api/codex", True),
+        ("https://api.openai.com/v1", False),
+    ],
+)
+def test_native_profiles_use_live_discovery_with_explicit_static_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    native_url: str,
+    live: bool,
+) -> None:
+    native_path = tmp_path / "models.json"
+    native_path.write_text(json.dumps({"models": [{"slug": "gpt-native"}]}))
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "providers": {
+                    "anthropic": {"type": "passthrough", "base_url": "https://api.anthropic.com"},
+                    "native": {
+                        "type": "passthrough",
+                        "base_url": native_url,
+                        "responses_base_url": native_url,
+                        "forward_client_auth": True,
+                        "responses_forward_client_auth": True,
+                    },
+                },
+                "rules": [],
+                "default": {"provider": "anthropic"},
+                "responses_default": {"provider": "native"},
+                "codex_catalog_path": str(native_path),
+            }
+        )
+    )
+    monkeypatch.setenv("ROUTER_CONFIG_PATH", str(config_path))
+    assert main(["--output-dir", str(tmp_path)]) == 0
+    profile_path = tmp_path / "open-harness-router.config.toml"
+    profile = tomllib.loads(profile_path.read_text())
+    assert ("model_catalog_json" not in profile) is live
+    assert profile["model_provider"] == "openai"
+    assert profile["openai_base_url"] == "http://127.0.0.1:8787/v1"
+    assert (tmp_path / "open-harness-router.models.json").exists()
+    assert main(["--output-dir", str(tmp_path), "--static-catalog"]) == 0
+    assert tomllib.loads(profile_path.read_text())["model_catalog_json"] == str(
+        tmp_path / "open-harness-router.models.json"
+    )

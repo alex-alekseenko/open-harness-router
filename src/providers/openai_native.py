@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Mapping
-from typing import Literal
+from typing import Any, Literal
+
+import httpx
 
 from const import UPSTREAM_STREAM_INTERRUPTED_MESSAGE
 from conversion.responses_tools import CustomToolsAdapter
-from errors import UpstreamError
+from errors import ConfigError, UpstreamError
 from providers.base import ClientChannel, ProviderResult
 from providers.passthrough import PassthroughProvider
+from services.codex_catalog import validate_catalog
 
 
 class NativeOpenAIProvider(PassthroughProvider):
@@ -20,6 +23,45 @@ class NativeOpenAIProvider(PassthroughProvider):
     Bearer authentication; the explicitly configured native fallback can
     preserve the client's own OpenAI credentials.
     """
+
+    async def fetch_model_catalog(
+        self,
+        client_headers: Mapping[str, str],
+        *,
+        client_version: str | None,
+    ) -> dict[str, Any]:
+        """Fetch this caller's native catalog without reading or storing login credentials."""
+        if not self.cfg.forward_client_auth:
+            raise UpstreamError("Native catalog discovery requires client authentication", 400)
+        headers = self._build_headers(
+            {
+                k: v
+                for k, v in client_headers.items()
+                if k.lower() not in {"if-none-match", "if-modified-since", "accept-encoding"}
+            }
+        )
+        headers.update({"accept": "application/json", "accept-encoding": "identity"})
+        params = {"client_version": client_version} if client_version is not None else None
+        try:
+            async with self._client.stream(
+                "GET",
+                "models",
+                params=params,
+                headers=headers,
+                timeout=20.0,
+            ) as response:
+                if response.status_code != 200:
+                    status = response.status_code if response.status_code >= 400 else 502
+                    raise UpstreamError("Native model discovery failed", status)
+                await response.aread()
+                try:
+                    return validate_catalog(response.json())
+                except (ValueError, ConfigError) as exc:
+                    raise UpstreamError("Upstream returned an invalid Codex model catalog") from exc
+        except httpx.TimeoutException as exc:
+            raise UpstreamError("Native model discovery timed out", 504) from exc
+        except httpx.HTTPError as exc:
+            raise UpstreamError("Native model discovery failed", 502) from exc
 
     async def handle_images(
         self,

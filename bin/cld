@@ -1,0 +1,10 @@
+#!/bin/sh
+
+if [ "${1-}" = "--codex-login" ]; then
+    shift
+    codex login || exit "$?"
+fi
+
+unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+export CLAUDE_CONFIG_DIR="$HOME/.claude-ohr"
+exec claude "$@"

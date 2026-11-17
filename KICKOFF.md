@@ -51,12 +51,25 @@ Configuration is read at startup, so changes require a validated restart.
 | `http://127.0.0.1:8787/health` | Router health and configured providers |
 | `http://127.0.0.1:8787/dashboard` | Requests, errors, usage and routing |
 | `http://127.0.0.1:8787/codex/models` | Combined Codex catalog |
-| `http://127.0.0.1:8787/v1/models` | The same catalog as OpenAI model IDs |
+| `http://127.0.0.1:8787/v1/models` | OpenAI IDs, native Codex catalog with `client_version`, or Anthropic discovery with `anthropic-version` |
 
 `make run-proxy` additionally starts the CONNECT/TLS proxy on port 8788 for
 Claude Code. Codex uses port 8787 and needs no forward-proxy root certificate.
 See [client setup](README.md#connecting-codex) and
 [background services](README.md#running-in-the-background) for full setup.
+
+### Claude Code with own-key models only
+
+Generate an isolated local gateway profile and start Claude Code without
+account sign-in. Choose an own-key model from `/model`:
+
+```bash
+PYTHONPATH=src uv run python -m cli.sync_client_config --gateway-only
+./bin/cld
+```
+
+See the [Claude Code gateway setup](README.md#claude-code-without-an-anthropic-subscription)
+for profile behavior and subscription features.
 
 ## Choose models in Codex
 
@@ -73,9 +86,12 @@ PYTHONPATH=src uv run python -m cli.sync_codex_config --output-dir ~/.codex --mo
 codex -p open-harness-router
 ```
 
-The generator writes the dedicated profile and catalog, leaving `config.toml`
-alone. Preserve any personal profile overrides when regenerating. Restart
-Codex and open `/model` after changing its catalog. `cdx` is an optional shell
+The generator writes a dedicated profile and catalog snapshot, leaving
+`config.toml` alone. ChatGPT subscription profiles use live upstream discovery
+through OHR instead of pinning the snapshot; API-key/custom-only profiles keep
+static catalogs. Use `--static-catalog` to pin explicitly. Remove any effective
+`model_catalog_json` in other config layers for live discovery. Preserve personal
+profile overrides when regenerating; restart Codex after changing its profile. `cdx` is an optional shell
 alias for `codex -p open-harness-router`, not a command installed by the repo.
 
 Switching models with `-m` retains the profile's reasoning effort. Ensure it
@@ -86,6 +102,10 @@ profile settings override catalog defaults; select a supported effort with
 The picker includes configured exact model IDs and `client_models`, plus the
 native account catalog when configured. It does not discover every upstream
 model or guarantee access: credentials, quotas and permissions still apply.
+Native OpenAI catalog updates are fetched with the caller's account auth on
+normal client refreshes. Native Anthropic discovery is forwarded in its own
+format in both HTTP and CONNECT modes. OHR cannot force a client's existing
+picker/cache or bundled aliases to refresh. Static catalogs must be regenerated.
 
 Translated routes support text/images, streaming, function/freeform tools,
 namespaces and tool-result continuation. They require full `input` history;

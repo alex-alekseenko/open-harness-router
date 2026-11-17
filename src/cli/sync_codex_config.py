@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
@@ -29,6 +30,11 @@ def main(argv: list[str] | None = None) -> int:
         "--base-catalog",
         type=Path,
         help="merge native Codex models (defaults to routing.codex_catalog_path)",
+    )
+    parser.add_argument(
+        "--static-catalog",
+        action="store_true",
+        help="pin the generated catalog instead of live native-account discovery",
     )
     args = parser.parse_args(argv)
     try:
@@ -82,11 +88,26 @@ def main(argv: list[str] | None = None) -> int:
         native_url_line = (
             f"openai_base_url = {json.dumps(args.base_url.rstrip('/'))}\n" if forward_auth else ""
         )
+        fallback = (
+            config.providers[config.responses_default.provider]
+            if forward_auth and config.responses_default is not None
+            else None
+        )
+        discovery_url = urlsplit(fallback.responses_base_url or "") if fallback else None
+        live_catalog = (
+            discovery_url is not None
+            and discovery_url.hostname == "chatgpt.com"
+            and discovery_url.path.rstrip("/") == "/backend-api/codex"
+            and not args.static_catalog
+        )
+        catalog_line = (
+            "" if live_catalog else f"model_catalog_json = {json.dumps(str(catalog_path))}\n"
+        )
         profile = (
             f"model = {json.dumps(model)}\n"
             f"model_provider = {json.dumps(provider_id)}\n"
             f"{native_url_line}"
-            f"model_catalog_json = {json.dumps(str(catalog_path))}\n"
+            f"{catalog_line}"
             f"{effort_line}"
             f"{search_line}\n"
             f"[model_providers.{PROFILE_NAME}]\n"

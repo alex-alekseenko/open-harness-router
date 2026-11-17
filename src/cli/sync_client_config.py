@@ -5,7 +5,7 @@ relative to the working directory, as under the launchd service
 (``settings.RoutingSettings``)::
 
     PYTHONPATH=src .venv/bin/python -m cli.sync_client_config \\
-        [--settings-path FILE] [--check]
+        [--settings-path FILE] [--gateway-only] [--check]
 
     make sync-client-config
 
@@ -44,6 +44,7 @@ EXIT_OUT_OF_SYNC = 3
 # A dedicated file, never ``~/.claude/settings.json``: the CLI rewrites that
 # one during a session, and a regenerated copy would drop what it wrote.
 DEFAULT_SETTINGS_PATH = Path.home() / ".claude" / "open-harness-router.settings.json"
+GATEWAY_SETTINGS_PATH = Path.home() / ".claude-ohr" / "settings.json"
 
 ENFORCEMENT_ENV_VAR = "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"
 ENFORCEMENT_ENV_VALUE = "1"
@@ -51,6 +52,13 @@ ENFORCEMENT_ENV_VALUE = "1"
 _ENV_KEY = "env"
 _MODEL_PICKER_KEY = "modelPicker"
 _OPTIONS_KEY = "options"
+_GATEWAY_MODEL_ENV = (
+    "ANTHROPIC_DEFAULT_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+)
 
 
 def collect_model_options(
@@ -211,6 +219,30 @@ def render_settings(document: dict[str, Any]) -> str:
     return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
 
 
+def _configure_local_gateway(document: dict[str, Any], settings: Settings) -> None:
+    """Configure Claude Code's documented gateway mode for a loopback listener."""
+    host = settings.server.host
+    if host not in {"127.0.0.1", "::1", "localhost"}:
+        raise ConfigError("--gateway-only requires a loopback router listener")
+    options = document[_MODEL_PICKER_KEY][_OPTIONS_KEY]
+    if not options:
+        raise ConfigError("--gateway-only requires at least one own-key model in the picker")
+
+    model_ids = [option["model"] for option in options]
+    env = document[_ENV_KEY]
+    for key in _GATEWAY_MODEL_ENV:
+        if env.get(key) not in model_ids:
+            env[key] = model_ids[0]
+
+    address = f"[{host}]" if host == "::1" else host
+    env["ANTHROPIC_BASE_URL"] = f"http://{address}:{settings.server.port}"
+    # Claude Code expects a gateway credential to skip account sign-in. The
+    # loopback router does not authenticate this marker and uses its own keys.
+    env["ANTHROPIC_AUTH_TOKEN"] = "ohr-local"
+    env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "0"
+    document[_MODEL_PICKER_KEY]["replaceBuiltInOptions"] = True
+
+
 def _object_section(document: dict[str, Any], key: str) -> dict[str, Any]:
     """Return a mutable copy of a top-level object section, creating it when absent."""
     section = document.get(key, {})
@@ -247,9 +279,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--settings-path",
         type=Path,
-        default=DEFAULT_SETTINGS_PATH,
         metavar="FILE",
         help=f"settings file to generate (default: {DEFAULT_SETTINGS_PATH})",
+    )
+    parser.add_argument(
+        "--gateway-only",
+        action="store_true",
+        help=(
+            "configure a loopback gateway without Claude account sign-in "
+            f"(default target: {GATEWAY_SETTINGS_PATH})"
+        ),
     )
     parser.add_argument(
         "--check",
@@ -270,12 +309,18 @@ def main(argv: list[str] | None = None) -> int:
         The process exit code (see the module docstring).
     """
     args = _build_parser().parse_args(argv)
-    settings_path: Path = args.settings_path
+    settings_path: Path = args.settings_path or (
+        GATEWAY_SETTINGS_PATH if args.gateway_only else DEFAULT_SETTINGS_PATH
+    )
     try:
-        config = load_routing_config(Settings().routing.config_path)
+        settings = Settings()
+        config = load_routing_config(settings.routing.config_path)
         options, native_passthrough_count, _skipped = collect_model_options(config)
         current, existing = read_settings(settings_path)
-        wanted = render_settings(build_settings_document(existing, options))
+        document = build_settings_document(existing, options)
+        if args.gateway_only:
+            _configure_local_gateway(document, settings)
+        wanted = render_settings(document)
         # An empty picker means every rule was a native passthrough rule: a
         # rule that named no id either went to ``skipped`` (and a skipped rule
         # with nothing else to offer is a config error raised above) or was
@@ -296,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             print(_diff(current, wanted, settings_path), file=sys.stderr)
             print(
                 f"OUT OF SYNC: {settings_path} does not match routing.yaml; "
-                "run 'make sync-client-config'",
+                "rerun without --check",
                 file=sys.stderr,
             )
             return EXIT_OUT_OF_SYNC
