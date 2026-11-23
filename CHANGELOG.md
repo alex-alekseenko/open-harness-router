@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `major.minor.micro`
 and every release is tagged `vX.Y.Z`.
 
+## [0.9.0] - 2026-11-23
+
+### Added
+
+- Route plaintext Codex subagent tasks to custom providers through the standard profile, including OpenCode ([#61](https://github.com/kskadart/open-harness-router/pull/61))
+
 ## [0.8.0] - 2026-11-17
 
 ### Added
