@@ -111,6 +111,7 @@ def test_generator_writes_parseable_dedicated_profile_without_needing_secrets(
     assert profile["model_provider"] == "openai"
     assert profile["openai_base_url"] == "http://127.0.0.1:8787/v1"
     assert profile["features"]["enable_request_compression"] is False
+    assert profile["features"]["multi_agent_v2"] == {"non_code_mode_only": False}
     # Legacy provider remains selectable for threads created by old profiles.
     assert profile["model_providers"]["open-harness-router"]["requires_openai_auth"] is True
     catalog = json.loads(catalog_path.read_text())
@@ -208,8 +209,152 @@ def test_native_profiles_use_live_discovery_with_explicit_static_opt_in(
     assert ("model_catalog_json" not in profile) is live
     assert profile["model_provider"] == "openai"
     assert profile["openai_base_url"] == "http://127.0.0.1:8787/v1"
+    assert ("multi_agent_v2" in profile["features"]) is live
     assert (tmp_path / "open-harness-router.models.json").exists()
     assert main(["--output-dir", str(tmp_path), "--static-catalog"]) == 0
-    assert tomllib.loads(profile_path.read_text())["model_catalog_json"] == str(
-        tmp_path / "open-harness-router.models.json"
+    pinned_profile = tomllib.loads(profile_path.read_text())
+    assert pinned_profile["model_catalog_json"] == str(tmp_path / "open-harness-router.models.json")
+    assert "multi_agent_v2" not in pinned_profile["features"]
+
+    config = yaml.safe_load(config_path.read_text())
+    config["providers"]["chat"] = {
+        "type": "openai-translate",
+        "base_url": "https://chat.example/v1",
+        "api_key_env": "CHAT_API_KEY",
+        "max_tokens_limit": 4096,
+    }
+    config["rules"] = [{"match": {"type": "exact", "value": "deepseek"}, "provider": "chat"}]
+    config_path.write_text(yaml.safe_dump(config))
+    assert main(["--output-dir", str(tmp_path)]) == 0
+    profile = tomllib.loads(profile_path.read_text())
+    assert profile["features"]["multi_agent_v2"] == {"non_code_mode_only": False}
+    assert ("model_catalog_json" not in profile) is live
+
+
+@pytest.mark.parametrize(
+    ("responses_default_provider", "rule_provider"),
+    [
+        ("native", "forwarded_custom"),
+        ("forwarded_custom", "forwarded_custom"),
+    ],
+    ids=["custom-rule", "custom-responses-default"],
+)
+def test_non_default_responses_auth_provider_enables_code_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    responses_default_provider: str,
+    rule_provider: str,
+) -> None:
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "providers": {
+                    "native": {
+                        "type": "passthrough",
+                        "base_url": "https://chatgpt.com/backend-api/codex",
+                        "responses_base_url": "https://chatgpt.com/backend-api/codex",
+                        "forward_client_auth": True,
+                        "responses_forward_client_auth": True,
+                    },
+                    "forwarded_custom": {
+                        "type": "passthrough",
+                        "base_url": "https://custom.example/v1",
+                        "responses_base_url": "https://custom.example/v1",
+                        "forward_client_auth": True,
+                        "responses_forward_client_auth": True,
+                    },
+                },
+                "rules": [
+                    {
+                        "match": {"type": "exact", "value": "custom-model"},
+                        "provider": rule_provider,
+                    }
+                ],
+                "default": {"provider": "native"},
+                "responses_default": {"provider": responses_default_provider},
+            }
+        )
     )
+    monkeypatch.setenv("ROUTER_CONFIG_PATH", str(config_path))
+    assert main(["--output-dir", str(tmp_path)]) == 0
+    profile = tomllib.loads((tmp_path / "open-harness-router.config.toml").read_text())
+    assert profile["features"]["multi_agent_v2"] == {"non_code_mode_only": False}
+
+
+def test_non_gpt_native_catalog_model_enables_code_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_path = tmp_path / "models.json"
+    native_path.write_text(
+        json.dumps({"models": [{"slug": "gpt-native"}, {"slug": "o3"}]})
+    )
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "providers": {
+                    "anthropic": {
+                        "type": "passthrough",
+                        "base_url": "https://api.anthropic.com",
+                    },
+                    "native": {
+                        "type": "passthrough",
+                        "base_url": "https://chatgpt.com/backend-api/codex",
+                        "responses_base_url": "https://chatgpt.com/backend-api/codex",
+                        "forward_client_auth": True,
+                        "responses_forward_client_auth": True,
+                    },
+                },
+                "rules": [],
+                "default": {"provider": "anthropic"},
+                "responses_default": {"provider": "native"},
+                "codex_catalog_path": str(native_path),
+            }
+        )
+    )
+    monkeypatch.setenv("ROUTER_CONFIG_PATH", str(config_path))
+    assert main(["--output-dir", str(tmp_path)]) == 0
+    profile = tomllib.loads((tmp_path / "open-harness-router.config.toml").read_text())
+    assert profile["features"]["multi_agent_v2"] == {"non_code_mode_only": False}
+
+
+def test_own_key_responses_fallback_without_rules_enables_code_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_path = tmp_path / "models.json"
+    native_path.write_text(json.dumps({"models": [{"slug": "fallback-model"}]}))
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "providers": {
+                    "anthropic": {
+                        "type": "passthrough",
+                        "base_url": "https://api.anthropic.com",
+                    },
+                    "fallback": {
+                        "type": "passthrough",
+                        "base_url": "https://custom.example/v1",
+                        "responses_base_url": "https://custom.example/v1",
+                        "forward_client_auth": False,
+                        "api_key_env": "FALLBACK_KEY",
+                    },
+                },
+                "rules": [],
+                "default": {"provider": "anthropic"},
+                "responses_default": {"provider": "fallback"},
+                "codex_catalog_path": str(native_path),
+            }
+        )
+    )
+    monkeypatch.setenv("ROUTER_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("FALLBACK_KEY", raising=False)
+    assert main(["--output-dir", str(tmp_path)]) == 0
+    profile = tomllib.loads((tmp_path / "open-harness-router.config.toml").read_text())
+    assert profile["features"]["multi_agent_v2"] == {"non_code_mode_only": False}

@@ -7,7 +7,7 @@ import zlib
 from collections.abc import AsyncIterator
 from typing import Any
 
-from conversion.responses_ingress import ResponsesRequestMapper
+from conversion.responses_ingress import ResponsesRequestMapper, responses_reasoning_effort
 from conversion.responses_output import ResponsesOutputMapper
 from errors import UpstreamError
 from log import get_logger
@@ -74,6 +74,7 @@ async def handle_translated_responses(
         channel,
         upstream_model,
         limits,
+        bridge_reasoning_effort=responses_reasoning_effort(payload),
     )
     headers = {
         k: v

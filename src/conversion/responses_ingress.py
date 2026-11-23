@@ -3,16 +3,120 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
+from urllib.parse import urlsplit
 
 from conversion.responses_tools import CustomToolsAdapter
 from errors import UpstreamError
-from routing.schema import ProviderCfg
+from routing.schema import ProviderCfg, ReasoningEffort
+
+_OPENAI_RESPONSES_BASES = {("chatgpt.com", "/backend-api/codex"), ("api.openai.com", "/v1")}
 
 
 def invalid(message: str) -> UpstreamError:
     """Reject unsupported input before contacting an upstream."""
     return UpstreamError(message, 400, "invalid_request_error")
+
+
+def is_trusted_openai_responses_url(url: str) -> bool:
+    """Return whether a URL is an official, authenticated-safe OpenAI Responses base."""
+    try:
+        upstream = urlsplit(url)
+        port = upstream.port
+    except ValueError:
+        return False
+    return (
+        upstream.scheme == "https"
+        and upstream.username is None
+        and upstream.password is None
+        and port in {None, 443}
+        and not upstream.query
+        and not upstream.fragment
+        and (upstream.hostname, upstream.path.rstrip("/")) in _OPENAI_RESPONSES_BASES
+    )
+
+
+def unsupported_encrypted_agent_message() -> UpstreamError:
+    """Report an encrypted subagent task on a route that requires plaintext."""
+    return UpstreamError(
+        "Encrypted subagent prompts or context are unsupported on this model route. "
+        "Use Codex Code Mode to send the task as plaintext, or use an authenticated native "
+        "OpenAI GPT route for encrypted tasks.",
+        400,
+        "unsupported_encrypted_agent_message",
+    )
+
+
+def has_encrypted_agent_message(payload: dict[str, Any]) -> bool:
+    """Return whether a Responses input carries opaque subagent content."""
+    items = payload.get("input")
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            continue
+        if item.get("encrypted_content") is not None:
+            return True
+        content = item.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "encrypted_content"
+            for block in content
+        ):
+            return True
+    return False
+
+
+_RESPONSES_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
+
+
+def responses_reasoning_effort(payload: dict[str, Any]) -> ReasoningEffort | None:
+    """Return a recognized raw Responses effort for an explicit bridge handoff."""
+    reasoning = payload.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    effort = reasoning.get("effort")
+    if effort in _RESPONSES_REASONING_EFFORTS:
+        return cast(ReasoningEffort, effort)
+    return None
+
+
+def _plaintext_agent_blocks(item: dict[str, Any]) -> list[dict[str, Any]]:
+    if item.get("encrypted_content") is not None:
+        raise unsupported_encrypted_agent_message()
+    blocks = item.get("content")
+    if not isinstance(blocks, list) or not blocks:
+        raise invalid("Responses agent_message must contain a non-empty content array")
+    if any(
+        isinstance(block, dict) and block.get("type") == "encrypted_content" for block in blocks
+    ):
+        raise unsupported_encrypted_agent_message()
+    if any(
+        not isinstance(block, dict)
+        or block.get("type") != "input_text"
+        or not isinstance(block.get("text"), str)
+        for block in blocks
+    ):
+        raise invalid("Responses agent_message requires plaintext input_text blocks")
+    return blocks
+
+
+def adapt_agent_messages(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deliver plaintext Codex tasks to custom Responses providers as user messages."""
+    items = payload.get("input")
+    if not isinstance(items, list):
+        return payload
+    adapted = None
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            continue
+        if adapted is None:
+            adapted = items.copy()
+        adapted[index] = {
+            "type": "message",
+            "role": "user",
+            "content": _plaintext_agent_blocks(item),
+        }
+    return {**payload, "input": adapted} if adapted is not None else payload
 
 
 def can_translate_responses(cfg: ProviderCfg) -> bool:
@@ -134,6 +238,9 @@ class ResponsesRequestMapper:
                     continue
                 if role not in {"assistant", "user"}:
                     raise invalid(f"Unsupported message role: {role}")
+            elif kind == "agent_message":
+                role = "user"
+                content = _content(_plaintext_agent_blocks(item))
             elif kind == "function_call":
                 role = "assistant"
                 try:

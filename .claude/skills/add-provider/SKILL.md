@@ -298,6 +298,19 @@ carries the numbers of step 6. Anything else: fix and
 repeat before restarting. Exit 1 prints the same `open-harness-router: ...`
 message the service would die with.
 
+### 8a. Codex subagent transport
+
+Before advertising a Codex subagent, use the normal generated OHR profile and
+a synthetic task against an isolated router. Every custom Responses, Chat
+Completions or Messages target must receive the task as plaintext through
+Code Mode. Verify that a real child returns its result to the parent, and that
+an encrypted `agent_message` receives a local HTTP 400 with code
+`unsupported_encrypted_agent_message` and no upstream I/O. For native GPT,
+encrypted tasks are allowed only through the authenticated official OpenAI
+Responses fallback. Record whether the check used a real child or a mocked
+wire test. Ordinary requests cannot validate child transport. Never send
+ciphertext to a custom provider or log prompt bodies or credentials.
+
 ### 9. Restart -- top-level session only, one command
 
 Determine the platform FIRST -- the restart command differs and only one of

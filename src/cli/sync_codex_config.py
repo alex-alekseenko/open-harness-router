@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
-from conversion.responses_ingress import can_translate_responses
+from conversion.responses_ingress import can_translate_responses, is_trusted_openai_responses_url
 from errors import ConfigError
 from routing.config_loader import load_routing_config
 from services.codex_catalog import load_catalog, merge_catalogs, model_catalog
@@ -39,14 +39,40 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = load_routing_config(Settings().routing.config_path)
-        names = {
+        responses_providers = {
             name
             for name, cfg in config.providers.items()
             if cfg.responses_base_url is not None
             or cfg.api_flavor == "responses"
             or can_translate_responses(cfg)
         }
-        catalog = model_catalog(config.rules, config.providers, names)
+        responses_default_provider = (
+            config.responses_default.provider if config.responses_default is not None else None
+        )
+        responses_default_cfg = (
+            config.providers[responses_default_provider]
+            if responses_default_provider is not None
+            else None
+        )
+        trusted_responses_default = (
+            responses_default_cfg is not None
+            and responses_default_cfg.responses_forward_client_auth
+            and responses_default_cfg.tls_verify_hostname
+            and is_trusted_openai_responses_url(
+                responses_default_cfg.responses_base_url
+                or (
+                    responses_default_cfg.base_url
+                    if responses_default_cfg.api_flavor == "responses"
+                    else ""
+                )
+            )
+        )
+        custom_providers = {
+            name
+            for name in responses_providers
+            if name != responses_default_provider or not trusted_responses_default
+        }
+        catalog = model_catalog(config.rules, config.providers, responses_providers)
         source = args.base_catalog or config.codex_catalog_path
         if source is not None:
             if config.responses_default is None:
@@ -103,6 +129,17 @@ def main(argv: list[str] | None = None) -> int:
         catalog_line = (
             "" if live_catalog else f"model_catalog_json = {json.dumps(str(catalog_path))}\n"
         )
+        # V2 sends nested Code Mode tool arguments as plaintext to the child.
+        # Keep the model catalog's choice of multi-agent version.
+        has_custom_route = any(rule.provider in custom_providers for rule in config.rules)
+        if responses_default_provider is not None:
+            has_custom_route = has_custom_route or responses_default_provider in custom_providers
+        has_non_gpt_route = any(not model_id.startswith("gpt-") for model_id in ids)
+        agent_tools = (
+            "\n[features.multi_agent_v2]\nnon_code_mode_only = false\n"
+            if has_custom_route or has_non_gpt_route or live_catalog
+            else ""
+        )
         profile = (
             f"model = {json.dumps(model)}\n"
             f"model_provider = {json.dumps(provider_id)}\n"
@@ -118,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             # The router parses JSON to choose a model, and currently serves
             # HTTP Responses rather than accepting compressed request bodies.
             + ("\n[features]\nenable_request_compression = false\n" if forward_auth else "")
+            + agent_tools
         )
         write_text_atomic(catalog_path, json.dumps(catalog, indent=2) + "\n")
         write_text_atomic(profile_path, profile)

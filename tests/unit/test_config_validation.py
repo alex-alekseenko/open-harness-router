@@ -241,6 +241,24 @@ def test_reasoning_effort_invalid_value_is_rejected() -> None:
         RoutingConfig.model_validate(raw)
 
 
+def test_forward_chat_reasoning_effort_is_valid_only_for_chat_translation() -> None:
+    raw = _clone_valid()
+    raw["providers"]["openai_compatible"]["forward_chat_reasoning_effort"] = True
+    config = RoutingConfig.model_validate(raw)
+    assert config.providers["openai_compatible"].forward_chat_reasoning_effort is True
+
+    invalid = _clone_valid()
+    invalid["providers"]["anthropic"]["forward_chat_reasoning_effort"] = True
+    with pytest.raises(ValueError, match="openai-translate with api_flavor='chat'"):
+        RoutingConfig.model_validate(invalid)
+
+    invalid = _clone_valid()
+    invalid["providers"]["openai_compatible"]["forward_chat_reasoning_effort"] = True
+    invalid["providers"]["openai_compatible"]["api_flavor"] = "responses"
+    with pytest.raises(ValueError, match="openai-translate with api_flavor='chat'"):
+        RoutingConfig.model_validate(invalid)
+
+
 def test_token_param_max_output_tokens_accepted() -> None:
     """token_param=max_output_tokens (Responses API) parses on openai-translate."""
     raw = _clone_valid()

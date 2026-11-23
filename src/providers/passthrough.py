@@ -28,7 +28,7 @@ from const import (
 from errors import UpstreamError, stream_error_event
 from log import get_logger
 from providers.base import ClientChannel, ProviderResult
-from routing.schema import ProviderCfg, RouteLimits
+from routing.schema import ProviderCfg, ReasoningEffort, RouteLimits
 from services.header_utils import (
     forward_headers,
     merge_extra_headers,
@@ -466,6 +466,7 @@ class PassthroughProvider:
         limits: RouteLimits,
         *,
         query: str = "",
+        bridge_reasoning_effort: ReasoningEffort | None = None,
     ) -> ProviderResult:
         """Proxy /v1/messages; upstream_model and limits do not apply (body goes as received)."""
         return await self._proxy(

@@ -12,7 +12,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from routing.schema import ProviderCfg, RouteLimits
+from routing.schema import ProviderCfg, ReasoningEffort, RouteLimits
 
 
 @runtime_checkable
@@ -108,8 +108,13 @@ class Provider(Protocol):
         limits: RouteLimits,
         *,
         query: str = "",
+        bridge_reasoning_effort: ReasoningEffort | None = None,
     ) -> ProviderResult:
-        """Handle a ``/v1/messages`` request and return the response to the client."""
+        """Handle a ``/v1/messages`` request and return the response to the client.
+
+        ``bridge_reasoning_effort`` carries an explicit Responses effort, including
+        ``none``, without widening the public Anthropic request schema.
+        """
         ...
 
     async def count_tokens(

@@ -99,6 +99,18 @@ is supported by the upstream: Kimi may reject an inherited `none`. Explicit
 profile settings override catalog defaults; select a supported effort with
 `-c 'model_reasoning_effort="high"'` when required, or use separate profiles.
 
+To delegate to a translated model such as `cl-deepseek-v4.1-flash` from a
+Multi-Agent V2 parent with Code Mode, use `spawn_agent` in the standard
+profile. OHR turns the plaintext agent task into a user message on custom
+Responses and translated routes.
+Encrypted agent tasks can only go to GPT models on the authenticated OpenAI
+Responses fallback.
+Chat Completions providers can opt in to forwarding the requested reasoning
+level with `forward_chat_reasoning_effort: true`.
+Model onboarding must pass the Codex subagent transport check in the
+add-provider skill.
+See [Codex subagent setup](README.md#run-custom-models-as-codex-subagents).
+
 The picker includes configured exact model IDs and `client_models`, plus the
 native account catalog when configured. It does not discover every upstream
 model or guarantee access: credentials, quotas and permissions still apply.

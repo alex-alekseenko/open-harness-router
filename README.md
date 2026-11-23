@@ -186,6 +186,35 @@ normal Codex sessions, so they can be resumed through the same profile:
 codex -p open-harness-router resume SESSION_ID
 ```
 
+#### Run custom models as Codex subagents
+
+For a Multi-Agent V2 parent with Code Mode, such as GPT-6.2 Sol, ask Codex
+to call `spawn_agent` with `model=cl-deepseek-v4.1-flash` or
+`model=kimi-for-coding`, assign the task, and wait for the result. Regenerate
+the standard profile after upgrading the router. The profile permits the
+nested Code Mode spawn when there is a custom Responses route or a translated
+route and retains live native discovery.
+
+Codex delivers nested Code Mode tasks as plaintext `agent_message` items.
+The router converts them to user messages on custom Responses and translated
+routes. For a direct V2 call with `agent_message.encrypted_content`, the router
+forwards the message only to a `gpt-` model on the authenticated OpenAI
+`responses_default` with client authentication forwarding and hostname
+verification enabled for the official OpenAI Responses endpoint. Other routes
+reject the encrypted task locally before contacting the upstream, so direct
+encrypted spawn fails on custom routes.
+The response is HTTP 400 with code `unsupported_encrypted_agent_message` and
+instructions for sending the task as plaintext through Codex Code Mode.
+Codex's inert `{"cyber":"standard"}` `access_programs` marker is removed on
+custom routes. Other program selections fail locally with
+`unsupported_access_programs`, while official OpenAI Responses routes receive
+the field unchanged.
+For Chat Completions providers that accept `reasoning_effort`, set
+`forward_chat_reasoning_effort: true` on the `openai-translate` provider to
+forward the client's explicit effort.
+
+#### Transport details
+
 The profile disables request-body compression so the router can read the model
 field. The router declines WebSocket handshakes with Codex's HTTP fallback
 signal (426), and streaming continues over HTTP without repeated reconnects.

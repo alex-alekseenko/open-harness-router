@@ -300,6 +300,9 @@ class ProviderCfg(BaseModel):
     ``reasoning_effort`` -- the reasoning level for the Responses API.
     Applied only when ``api_flavor="responses"``; ignored for ``chat``.
 
+    ``forward_chat_reasoning_effort`` -- sends the client's explicit output
+    effort as ``reasoning_effort`` to a compatible Chat Completions upstream.
+
     ``forward_client_auth`` -- passthrough auth mode; only applies to
     ``passthrough`` -- an explicit value on ``openai-translate`` (which
     always uses its own ``api_key_env``) is a startup error, not a silent
@@ -391,6 +394,7 @@ class ProviderCfg(BaseModel):
     quota_wait_max_s: float = Field(default=QUOTA_WAIT_MAX_S, ge=0)
     api_flavor: ApiFlavor = "chat"
     reasoning_effort: ReasoningEffort = "medium"
+    forward_chat_reasoning_effort: bool = False
     pricing: PricingCfg | None = None
 
     @model_validator(mode="after")
@@ -588,6 +592,18 @@ class ProviderCfg(BaseModel):
                 "fold_tool_additions is only valid on passthrough with "
                 "forward_client_auth=false: a native Anthropic upstream is "
                 "forwarded byte-for-byte and must never be rewritten"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_forward_chat_reasoning_effort_usage(self) -> ProviderCfg:
+        """Reject the Chat Completions effort opt-in on routes where it cannot apply."""
+        if self.forward_chat_reasoning_effort and (
+            self.type != "openai-translate" or self.api_flavor != "chat"
+        ):
+            raise ValueError(
+                "forward_chat_reasoning_effort is only valid on "
+                "openai-translate with api_flavor='chat'"
             )
         return self
 
