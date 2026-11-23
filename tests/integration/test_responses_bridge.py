@@ -32,7 +32,7 @@ MESSAGE = {
 
 @pytest_asyncio.fixture
 async def bridge_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> AsyncIterator[httpx.AsyncClient]:
     config = {
         "version": 1,
@@ -50,6 +50,7 @@ async def bridge_client(
                 "base_url": "https://chat.example/v1",
                 "api_key_env": "BRIDGE_KEY",
                 "max_tokens_limit": 4096,
+                "forward_chat_reasoning_effort": getattr(request, "param", False),
             },
         },
         "rules": [
@@ -111,9 +112,28 @@ async def test_messages_roundtrip_and_auth_isolation(
     assert [m["slug"] for m in catalog] == ["messages-model", "chat-model"]
 
 
+@pytest.mark.parametrize(
+    ("bridge_client", "task"),
+    [
+        (False, {"role": "user", "content": "Use echo"}),
+        (
+            True,
+            {
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/worker",
+                "content": [{"type": "input_text", "text": "Use echo"}],
+            },
+        ),
+    ],
+    ids=["user", "agent"],
+    indirect=["bridge_client"],
+)
 async def test_chat_function_call_and_tool_result_continuation(
     bridge_client: httpx.AsyncClient,
     httpx_mock: HTTPXMock,
+    task: dict[str, Any],
+    request: pytest.FixtureRequest,
 ) -> None:
     httpx_mock.add_response(
         url="https://chat.example/v1/chat/completions",
@@ -144,6 +164,7 @@ async def test_chat_function_call_and_tool_result_continuation(
     )
     payload = {
         "model": "chat-model",
+        "reasoning": {"effort": "high"},
         "tools": [
             {
                 "type": "function",
@@ -152,7 +173,7 @@ async def test_chat_function_call_and_tool_result_continuation(
             }
         ],
         "input": [
-            {"role": "user", "content": "Use echo"},
+            task,
             {
                 "type": "function_call",
                 "call_id": "call_1",
@@ -172,8 +193,134 @@ async def test_chat_function_call_and_tool_result_continuation(
     assert upstream is not None
     body = json.loads(upstream.content)
     assert body["model"] == "vendor-model"
+    expected_effort = "high" if request.node.callspec.params["bridge_client"] else None
+    assert body.get("reasoning_effort") == expected_effort
+    assert body["messages"][0] == {"role": "user", "content": "Use echo"}
     assert body["messages"][-1] == {"role": "tool", "tool_call_id": "call_1", "content": "one"}
     assert upstream.headers["authorization"] == "Bearer own-key"
+
+
+@pytest.mark.parametrize(
+    ("bridge_client", "effort", "expected_effort"),
+    [
+        (True, "none", "none"),
+        (False, "none", None),
+        (True, "high", "high"),
+    ],
+    indirect=["bridge_client"],
+)
+async def test_chat_bridge_preserves_explicit_reasoning_effort(
+    bridge_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+    effort: str,
+    expected_effort: str | None,
+) -> None:
+    httpx_mock.add_response(
+        url="https://chat.example/v1/chat/completions",
+        json={
+            "id": "chat_effort",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "vendor-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "OK"},
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    response = await bridge_client.post(
+        "/v1/responses",
+        json={
+            "model": "chat-model",
+            "reasoning": {"effort": effort},
+            "input": "Hello",
+        },
+    )
+    assert response.status_code == 200
+    upstream = httpx_mock.get_request()
+    assert upstream is not None
+    assert json.loads(upstream.content).get("reasoning_effort") == expected_effort
+
+
+@pytest.mark.parametrize(
+    "input_value",
+    [
+        "Hello",
+        [{"type": "agent_message", "content": [{"type": "input_text", "text": "Task"}]}],
+    ],
+    ids=["ordinary", "plaintext-agent"],
+)
+async def test_standard_access_programs_is_removed_on_translated_responses(
+    bridge_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+    input_value: Any,
+) -> None:
+    httpx_mock.add_response(
+        url="https://chat.example/v1/chat/completions",
+        json={
+            "id": "chat_access",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "vendor-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "OK"},
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    response = await bridge_client.post(
+        "/v1/responses",
+        json={
+            "model": "chat-model",
+            "access_programs": {"cyber": "standard"},
+            "input": input_value,
+        },
+    )
+    assert response.status_code == 200
+    upstream = httpx_mock.get_request()
+    assert upstream is not None
+    assert "access_programs" not in json.loads(upstream.content)
+
+
+@pytest.mark.parametrize(
+    "access_programs",
+    [
+        {"cyber": "named"},
+        {"cyber": "standard", "extra": True},
+        None,
+        ["cyber", "standard"],
+        "standard",
+    ],
+    ids=["named", "extra-key", "null", "array", "string"],
+)
+async def test_nonstandard_access_programs_is_rejected_before_translated_upstream(
+    bridge_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+    access_programs: Any,
+) -> None:
+    response = await bridge_client.post(
+        "/v1/responses",
+        json={
+            "model": "chat-model",
+            "access_programs": access_programs,
+            "input": "Hello",
+        },
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_access_programs"
+    assert error["message"].startswith(
+        "access_programs is supported only by the official OpenAI Responses endpoint."
+    )
+    assert httpx_mock.get_requests() == []
 
 
 def frames(events: list[dict[str, Any]]) -> bytes:
@@ -267,6 +414,77 @@ async def test_unsupported_or_malformed_input_fails_before_upstream(
     )
     assert response.status_code == 400
     assert "error" in response.json()
+
+
+@pytest.mark.parametrize(
+    "encrypted_fields",
+    [
+        {"content": [{"type": "encrypted_content", "encrypted_content": "ciphertext"}]},
+        {
+            "encrypted_content": "ciphertext",
+            "content": [{"type": "input_text", "text": "Payload:"}],
+        },
+        {"encrypted_content": "ciphertext"},
+    ],
+    ids=["nested", "top-level-mixed", "top-level-only"],
+)
+async def test_chat_rejects_encrypted_agent_task_before_upstream(
+    bridge_client: httpx.AsyncClient, httpx_mock: HTTPXMock, encrypted_fields: dict[str, Any]
+) -> None:
+    response = await bridge_client.post(
+        "/v1/responses",
+        json={
+            "model": "chat-model",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "author": "/root",
+                    "recipient": "/root/worker",
+                    **encrypted_fields,
+                }
+            ],
+        },
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_encrypted_agent_message"
+    assert error["message"].startswith(
+        "Encrypted subagent prompts or context are unsupported on this model route."
+    )
+    assert "Codex Code Mode" in error["message"]
+    assert httpx_mock.get_requests() == []
+
+
+async def test_encrypted_agent_task_precedes_conversation_validation(
+    bridge_client: httpx.AsyncClient, httpx_mock: HTTPXMock
+) -> None:
+    response = await bridge_client.post(
+        "/v1/responses",
+        json={
+            "model": "chat-model",
+            "conversation": "conv_previous",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "content": [{"type": "encrypted_content", "encrypted_content": "ciphertext"}],
+                }
+            ],
+        },
+    )
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "message": (
+                "Encrypted subagent prompts or context are unsupported on this model route. "
+                "Use Codex Code Mode to send the task as plaintext, or use an authenticated "
+                "native OpenAI GPT route for encrypted tasks."
+            ),
+            "type": "unsupported_encrypted_agent_message",
+            "code": "unsupported_encrypted_agent_message",
+            "param": None,
+        }
+    }
+    assert httpx_mock.get_requests() == []
 
 
 @pytest.mark.parametrize("stream", [False, True])

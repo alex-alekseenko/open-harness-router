@@ -4,20 +4,65 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import JSONResponse, Response
 
 from api.adapters import openai_error, to_fastapi_response
-from conversion.responses_ingress import can_translate_responses
+from conversion.responses_ingress import (
+    adapt_agent_messages,
+    can_translate_responses,
+    has_encrypted_agent_message,
+    is_trusted_openai_responses_url,
+    unsupported_encrypted_agent_message,
+)
 from dependencies import LoggerDep, RegistryDep
 from errors import UpstreamError, anthropic_error_body
+from providers.openai_native import NativeOpenAIProvider
 from providers.passthrough import PassthroughProvider
 from providers.responses_bridge import handle_translated_responses
 from services.codex_catalog import merge_catalogs, model_catalog
 from services.monitor import Monitor
 
 router = APIRouter()
+
+_STANDARD_ACCESS_PROGRAMS = {"cyber": "standard"}
+
+
+def _is_official_openai_responses_route(
+    native: NativeOpenAIProvider,
+) -> bool:
+    """Identify the configured official Responses transport, including own-key setups."""
+    return native.cfg.tls_verify_hostname and is_trusted_openai_responses_url(native.cfg.base_url)
+
+
+def _is_trusted_openai_agent_route(
+    native: NativeOpenAIProvider, responses_default: str | None
+) -> bool:
+    """Allow opaque agent tasks only on the authenticated official OpenAI endpoint."""
+    # The native transport owns the resolved Responses URL and client-auth setting.
+    return (
+        native.name == responses_default
+        and native.cfg.forward_client_auth
+        and _is_official_openai_responses_route(native)
+    )
+
+
+def _normalize_access_programs(payload: dict[str, Any]) -> dict[str, Any]:
+    """Remove Codex's inert standard access marker only from compatibility routes."""
+    if "access_programs" not in payload:
+        return payload
+    if payload["access_programs"] != _STANDARD_ACCESS_PROGRAMS:
+        raise UpstreamError(
+            "access_programs is supported only by the official OpenAI Responses endpoint. "
+            "The selected custom model route cannot safely honor a nonstandard program selection.",
+            400,
+            "unsupported_access_programs",
+        )
+    normalized = payload.copy()
+    del normalized["access_programs"]
+    return normalized
 
 
 @router.websocket("/v1/responses")
@@ -153,10 +198,27 @@ async def create_response(
     )
     try:
         if native is not None:
+            official_responses_route = _is_official_openai_responses_route(native)
+            trusted_agent_route = _is_trusted_openai_agent_route(
+                native, registry.responses_default
+            ) and payload["model"].startswith("gpt-")
+            if not trusted_agent_route:
+                adapted = adapt_agent_messages(payload)
+                if not official_responses_route:
+                    adapted = _normalize_access_programs(adapted)
+                if adapted is not payload:
+                    raw_body = json.dumps(adapted).encode()
+            elif not http_request.headers.get("authorization") and has_encrypted_agent_message(
+                payload
+            ):
+                raise unsupported_encrypted_agent_message()
             result = await native.handle_responses(
                 raw_body, http_request.headers, http_request, query=http_request.url.query
             )
         else:
+            if has_encrypted_agent_message(payload):
+                raise unsupported_encrypted_agent_message()
+            payload = _normalize_access_programs(payload)
             result = await handle_translated_responses(
                 payload, decision.provider, http_request, decision.upstream_model, decision.limits
             )

@@ -69,7 +69,7 @@ from models.claude import (
     ClaudeTool,
 )
 from providers.base import ClientChannel, ProviderResult
-from routing.schema import ProviderCfg, RouteLimits
+from routing.schema import ProviderCfg, ReasoningEffort, RouteLimits
 from services.http_transport import build_upstream_transport, build_upstream_verify
 from services.keepalive import with_keepalive
 from services.reasoning_cache import ReasoningCache
@@ -853,6 +853,7 @@ class OpenAITranslateProvider:
         limits: RouteLimits,
         *,
         query: str = "",
+        bridge_reasoning_effort: ReasoningEffort | None = None,
     ) -> ProviderResult:
         """Translate ``/v1/messages`` into OpenAI and return an Anthropic response.
 
@@ -886,7 +887,12 @@ class OpenAITranslateProvider:
 
         request_id = str(uuid.uuid4())
         is_responses = self.cfg.api_flavor == "responses"
-        openai_request = self._build_openai_request(parsed, upstream_model, limits)
+        openai_request = self._build_openai_request(
+            parsed,
+            upstream_model,
+            limits,
+            bridge_reasoning_effort=bridge_reasoning_effort,
+        )
 
         if limits.context_window is not None:
             rejected = self._enforce_context_window(openai_request, limits.context_window)
@@ -1018,6 +1024,7 @@ class OpenAITranslateProvider:
         limits: RouteLimits,
         *,
         log_dropped_tools: bool = True,
+        bridge_reasoning_effort: ReasoningEffort | None = None,
     ) -> dict[str, Any]:
         """Translate a parsed Claude request into the upstream wire body.
 
@@ -1032,6 +1039,8 @@ class OpenAITranslateProvider:
             upstream_model: upstream model name, or ``None`` to keep ``parsed.model``.
             limits: the route's effective token limits.
             log_dropped_tools: whether a tools cap is worth a warning (see ``cap_tools``).
+            bridge_reasoning_effort: explicit effort from a Responses bridge request,
+                used instead of the parsed Anthropic ``output_config.effort``.
 
         Returns:
             OpenAI request dict (Chat Completions or Responses).
@@ -1069,6 +1078,11 @@ class OpenAITranslateProvider:
             openai_request = convert_claude_to_openai(
                 parsed, upstream_model, max_tokens_limit=max_tokens_limit
             )
+            effort = bridge_reasoning_effort
+            if effort is None and parsed.output_config is not None:
+                effort = parsed.output_config.effort
+            if self.cfg.forward_chat_reasoning_effort and effort is not None:
+                openai_request["reasoning_effort"] = effort
         apply_param_compat(openai_request, self.cfg)
 
         # Always an explicit bool: some OpenAI-compatible gateways answer 400

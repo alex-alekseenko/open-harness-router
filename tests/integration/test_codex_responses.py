@@ -40,6 +40,22 @@ _NATIVE_MODEL = {
     "model_messages": {"custom": "keep intact"},
     "supported_reasoning_levels": [{"effort": "high", "description": "Native setting"}],
 }
+_ENCRYPTED_AGENT_MESSAGE = {
+    "type": "agent_message",
+    "author": "/root",
+    "recipient": "/root/worker",
+    "content": [
+        {"type": "input_text", "text": "Payload:"},
+        {"type": "encrypted_content", "encrypted_content": "opaque-task"},
+    ],
+}
+_PLAINTEXT_AGENT_MESSAGE = {
+    "type": "agent_message",
+    "author": "/root",
+    "recipient": "/root/worker",
+    "content": [{"type": "input_text", "text": "Plaintext task"}],
+}
+_STANDARD_ACCESS_PROGRAMS = {"cyber": "standard"}
 
 
 def test_builtin_codex_websocket_probe_gets_immediate_http_fallback() -> None:
@@ -109,13 +125,42 @@ async def codex_client(
         catalog_path.write_text(json.dumps({"models": [_NATIVE_MODEL], "identity": "private"}))
         config["codex_catalog_path"] = str(catalog_path)
         config["responses_default"] = {"provider": "codex_openai"}
+        native_url = {
+            "api-key": "https://api.openai.com/v1",
+            "foreign-native": "https://custom.example/v1",
+            "foreign-port": "https://api.openai.com:444/v1",
+            "not-default-api-key": "https://api.openai.com/v1",
+            "own-key-native": "https://api.openai.com/v1",
+        }.get(request.param, "https://chatgpt.com/backend-api/codex")
+        messages_url = {
+            "api-key": "https://messages.example",
+            "foreign-native": "https://api.openai.com/v1",
+        }.get(request.param, native_url)
         config["providers"]["codex_openai"] = {
             "type": "passthrough",
-            "base_url": "https://chatgpt.com/backend-api/codex",
-            "responses_base_url": "https://chatgpt.com/backend-api/codex",
-            "forward_client_auth": True,
-            "responses_forward_client_auth": True,
+            "base_url": messages_url,
+            "responses_base_url": native_url,
+            "forward_client_auth": request.param != "own-key-native",
+            "responses_forward_client_auth": request.param != "own-key-native",
+            "tls_verify_hostname": request.param != "unverified-hostname",
         }
+        if request.param == "own-key-native":
+            config["providers"]["codex_openai"]["api_key_env"] = "KIMI_TEST_KEY"
+        if request.param == "not-default-api-key":
+            config["providers"]["default_codex"] = {
+                "type": "passthrough",
+                "base_url": "https://api.openai.com/v1",
+                "responses_base_url": "https://api.openai.com/v1",
+                "forward_client_auth": True,
+                "responses_forward_client_auth": True,
+            }
+            config["responses_default"] = {"provider": "default_codex"}
+            config["rules"].append(
+                {
+                    "match": {"type": "exact", "value": "gpt-native"},
+                    "provider": "codex_openai",
+                }
+            )
         if request.param == "own-key":
             config["responses_default"] = {"provider": "kimi"}
     path = tmp_path / "routing.yaml"
@@ -138,7 +183,8 @@ async def codex_client(
 
 @pytest.mark.parametrize("codex_client", [False, True, "own-key"], indirect=True)
 async def test_dashboard_describes_independent_protocol_defaults(
-    codex_client: httpx.AsyncClient, request: pytest.FixtureRequest,
+    codex_client: httpx.AsyncClient,
+    request: pytest.FixtureRequest,
 ) -> None:
     """The dashboard reports the same native fallback and image trust policy as ingress."""
     configured = request.node.callspec.params["codex_client"]
@@ -177,7 +223,10 @@ async def test_native_request_preserves_tools_reasoning_and_replaces_credentials
     httpx_mock.add_response(url=_URL + "?test=true", json=_RESPONSE)
     payload = {
         "model": "kimi-for-coding",
-        "input": [{"type": "custom_tool_call_output", "call_id": "call_1", "output": "done"}],
+        "input": [
+            {"type": "custom_tool_call_output", "call_id": "call_1", "output": "done"},
+            {"type": "reasoning", "encrypted_content": "opaque-reasoning"},
+        ],
         "tools": [{"type": "custom", "name": "apply_patch", "format": {"type": "text"}}],
         "reasoning": {"effort": "high"},
         "include": ["reasoning.encrypted_content"],
@@ -203,6 +252,29 @@ async def test_native_request_preserves_tools_reasoning_and_replaces_credentials
     assert "x-api-key" not in request.headers
     assert "cookie" not in request.headers
     assert request.headers["user-agent"] == "real-codex-client/1"
+
+
+async def test_custom_native_responses_receives_plaintext_agent_task_as_user_message(
+    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock
+) -> None:
+    httpx_mock.add_response(url=_URL, json=_RESPONSE)
+    earlier_message = {"type": "message", "role": "user", "content": "Earlier instruction"}
+    payload = {
+        "model": "kimi-for-coding",
+        "input": [earlier_message, _PLAINTEXT_AGENT_MESSAGE],
+        "reasoning": {"effort": "max"},
+    }
+    response = await codex_client.post("/v1/responses", json=payload)
+    assert response.status_code == 200
+    outbound = httpx_mock.get_request()
+    assert outbound is not None
+    assert json.loads(outbound.content) == {
+        **payload,
+        "input": [
+            earlier_message,
+            {"type": "message", "role": "user", "content": _PLAINTEXT_AGENT_MESSAGE["content"]},
+        ],
+    }
 
 
 @pytest.mark.parametrize("codex_client", [True], indirect=True)
@@ -238,6 +310,199 @@ async def test_responses_default_forwards_native_subscription_credentials(
     assert outbound.headers["authorization"] == "Bearer native-subscription"
     assert outbound.headers["chatgpt-account-id"] == "account"
     assert "provider-secret" not in str(outbound.headers)
+
+
+@pytest.mark.parametrize(
+    "agent_message",
+    [
+        _ENCRYPTED_AGENT_MESSAGE,
+        {**_PLAINTEXT_AGENT_MESSAGE, "encrypted_content": "opaque-task"},
+        {"type": "agent_message", "encrypted_content": "opaque-task"},
+    ],
+    ids=["nested", "top-level-mixed", "top-level-only"],
+)
+@pytest.mark.parametrize(
+    ("codex_client", "url"),
+    [
+        (True, "https://chatgpt.com/backend-api/codex/responses"),
+        ("api-key", "https://api.openai.com/v1/responses"),
+    ],
+    indirect=["codex_client"],
+)
+async def test_encrypted_agent_message_is_forwarded_intact_to_native_gpt(
+    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock, url: str, agent_message: dict[str, Any]
+) -> None:
+    httpx_mock.add_response(url=url, json=_RESPONSE)
+    body = json.dumps(
+        {"model": "gpt-native", "input": [_PLAINTEXT_AGENT_MESSAGE, agent_message]},
+        indent=2,
+    )
+    response = await codex_client.post(
+        "/v1/responses",
+        content=body,
+        headers={"authorization": "Bearer native-auth", "content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    outbound = httpx_mock.get_request()
+    assert outbound is not None
+    assert outbound.content == body.encode()
+    assert outbound.headers["authorization"] == "Bearer native-auth"
+
+
+@pytest.mark.parametrize("codex_client", [True], indirect=True)
+async def test_encrypted_agent_message_without_auth_is_rejected_before_native_gpt(
+    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock
+) -> None:
+    response = await codex_client.post(
+        "/v1/responses",
+        json={"model": "gpt-native", "input": [_ENCRYPTED_AGENT_MESSAGE]},
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_encrypted_agent_message"
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.parametrize(
+    "agent_message",
+    [
+        _ENCRYPTED_AGENT_MESSAGE,
+        {**_PLAINTEXT_AGENT_MESSAGE, "encrypted_content": "opaque-task"},
+        {"type": "agent_message", "encrypted_content": "opaque-task"},
+    ],
+    ids=["nested", "top-level-mixed", "top-level-only"],
+)
+@pytest.mark.parametrize(
+    ("codex_client", "model"),
+    [
+        (True, "kimi-for-coding"),
+        (True, "reasoning-alias"),
+        (True, "non-gpt"),
+        ("own-key", "gpt-native"),
+        ("foreign-native", "gpt-native"),
+        ("foreign-port", "gpt-native"),
+        ("own-key-native", "gpt-native"),
+        ("unverified-hostname", "gpt-native"),
+    ],
+    indirect=["codex_client"],
+)
+async def test_encrypted_agent_message_stays_off_other_responses_routes(
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+    model: str,
+    agent_message: dict[str, Any],
+) -> None:
+    response = await codex_client.post(
+        "/v1/responses",
+        json={"model": model, "input": [agent_message]},
+        headers={"authorization": "Bearer native-auth"},
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_encrypted_agent_message"
+    assert error["message"].startswith(
+        "Encrypted subagent prompts or context are unsupported on this model route."
+    )
+    assert "Codex Code Mode" in error["message"]
+    assert httpx_mock.get_requests() == []
+
+
+async def test_standard_access_programs_is_removed_on_custom_responses(
+    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock
+) -> None:
+    httpx_mock.add_response(url=_URL, json=_RESPONSE)
+    response = await codex_client.post(
+        "/v1/responses",
+        json={
+            "model": "kimi-for-coding",
+            "access_programs": _STANDARD_ACCESS_PROGRAMS,
+            "input": [_PLAINTEXT_AGENT_MESSAGE],
+        },
+    )
+    assert response.status_code == 200
+    outbound = httpx_mock.get_request()
+    assert outbound is not None
+    payload = json.loads(outbound.content)
+    assert "access_programs" not in payload
+    assert payload["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Plaintext task"}],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "access_programs",
+    [
+        {"cyber": "named"},
+        {"cyber": "standard", "extra": True},
+        None,
+        ["cyber", "standard"],
+        "standard",
+    ],
+    ids=["named", "extra-key", "null", "array", "string"],
+)
+@pytest.mark.parametrize(
+    "codex_client",
+    [
+        False,
+    ],
+    indirect=["codex_client"],
+)
+async def test_nonstandard_access_programs_is_rejected_before_custom_upstream(
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+    access_programs: Any,
+) -> None:
+    response = await codex_client.post(
+        "/v1/responses",
+        json={
+            "model": "kimi-for-coding",
+            "access_programs": access_programs,
+            "input": [_PLAINTEXT_AGENT_MESSAGE],
+        },
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_access_programs"
+    assert error["message"].startswith(
+        "access_programs is supported only by the official OpenAI Responses endpoint."
+    )
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.parametrize(
+    ("codex_client", "url"),
+    [
+        ("not-default-api-key", "https://api.openai.com/v1/responses"),
+        ("api-key", "https://api.openai.com/v1/responses"),
+        ("own-key-native", "https://api.openai.com/v1/responses"),
+    ],
+    indirect=["codex_client"],
+)
+async def test_official_openai_responses_preserves_access_programs(
+    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(url=url, json=_RESPONSE)
+    body = json.dumps(
+        {
+            "model": "gpt-native",
+            "access_programs": {"cyber": "named"},
+            "input": "Hello",
+        },
+        indent=2,
+    )
+    response = await codex_client.post(
+        "/v1/responses",
+        content=body,
+        headers={"authorization": "Bearer native-auth", "content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    outbound = httpx_mock.get_request()
+    assert outbound is not None
+    assert outbound.content == body.encode()
 
 
 @pytest.mark.parametrize("codex_client", [True], indirect=True)
@@ -322,12 +587,17 @@ async def test_stream_failure_uses_openai_error_shape_and_releases_upstream(
 
 @pytest.mark.parametrize("cache_write", [0, 3])
 async def test_native_stream_preserves_wire_events_and_usage(
-    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock, cache_write: int,
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+    cache_write: int,
 ) -> None:
-    upstream_response = {**_RESPONSE, "usage": {
-        **_RESPONSE["usage"],
-        "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": cache_write},
-    }}
+    upstream_response = {
+        **_RESPONSE,
+        "usage": {
+            **_RESPONSE["usage"],
+            "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": cache_write},
+        },
+    }
     events = [
         {"type": "response.output_text.delta", "delta": "OK"},
         {"type": "response.completed", "response": upstream_response},
@@ -457,12 +727,19 @@ async def test_exec_custom_tool_round_trip_and_replay(
                 },
                 {"type": "custom_tool_call_output", "call_id": "patch_1", "output": "patched"},
                 {
-                    "type": "additional_tools", "id": "tools_from_previous_model",
+                    "type": "additional_tools",
+                    "id": "tools_from_previous_model",
                     "role": "developer",
-                    "tools": [{"type": "namespace", "name": "functions", "tools": [
-                        {"type": "custom", "name": "exec", "format": {"type": "text"}},
-                        {"type": "custom", "name": "apply_patch"},
-                    ]}],
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "functions",
+                            "tools": [
+                                {"type": "custom", "name": "exec", "format": {"type": "text"}},
+                                {"type": "custom", "name": "apply_patch"},
+                            ],
+                        }
+                    ],
                 },
             ],
             "tool_choice": {"type": "custom", "name": "exec"},
@@ -501,21 +778,33 @@ async def test_exec_custom_tool_round_trip_and_replay(
 @pytest.mark.parametrize("operation", ["generations", "edits"])
 @pytest.mark.parametrize("model", ["gpt-image-2", "kimi-for-coding"])
 async def test_native_images_preserve_json_auth_and_never_follow_custom_model_rules(
-    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock, operation: str, model: str,
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+    operation: str,
+    model: str,
 ) -> None:
-    response_body = {"created": 1, "data": [{"b64_json": "aW1hZ2U="}],
-                     "usage": {"input_tokens": 12, "output_tokens": 8}}
+    response_body = {
+        "created": 1,
+        "data": [{"b64_json": "aW1hZ2U="}],
+        "usage": {"input_tokens": 12, "output_tokens": 8},
+    }
     url = f"https://chatgpt.com/backend-api/codex/images/{operation}?test=true"
-    httpx_mock.add_response(url=url, json=response_body,
-                            headers={"x-codex-imagegen-request-id": "image-request-1"})
+    httpx_mock.add_response(
+        url=url, json=response_body, headers={"x-codex-imagegen-request-id": "image-request-1"}
+    )
     payload = {"model": model, "prompt": "samurai mask — ёжик", "background": "transparent"}
     if operation == "edits":
         payload["images"] = [{"image_url": "data:image/png;base64,aW1hZ2U="}]
     raw = json.dumps(payload, indent=2, ensure_ascii=False).encode()
     response = await codex_client.post(
-        f"/v1/images/{operation}?test=true", content=raw,
-        headers={"authorization": "Bearer native-client-token", "content-type": "application/json",
-                 "x-codex-image-turn-id": "turn-image-1", "Accept-Encoding": "gzip, deflate"},
+        f"/v1/images/{operation}?test=true",
+        content=raw,
+        headers={
+            "authorization": "Bearer native-client-token",
+            "content-type": "application/json",
+            "x-codex-image-turn-id": "turn-image-1",
+            "Accept-Encoding": "gzip, deflate",
+        },
     )
     assert response.status_code == 200
     assert response.json() == response_body
@@ -535,11 +824,14 @@ async def test_native_images_preserve_json_auth_and_never_follow_custom_model_ru
 @pytest.mark.parametrize("codex_client", [False, "own-key"], indirect=True)
 @pytest.mark.parametrize("operation", ["generations", "edits"])
 async def test_images_require_an_explicit_authenticated_native_fallback(
-    codex_client: httpx.AsyncClient, operation: str,
+    codex_client: httpx.AsyncClient,
+    operation: str,
 ) -> None:
-    response = await codex_client.post(f"/v1/images/{operation}",
-                                       json={"model": "gpt-image-2", "prompt": "test"},
-                                       headers={"authorization": "Bearer private-client-token"})
+    response = await codex_client.post(
+        f"/v1/images/{operation}",
+        json={"model": "gpt-image-2", "prompt": "test"},
+        headers={"authorization": "Bearer private-client-token"},
+    )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "unsupported_image_provider"
     assert Monitor.current().snapshot()["active"] == []
@@ -547,10 +839,13 @@ async def test_images_require_an_explicit_authenticated_native_fallback(
 
 @pytest.mark.parametrize("codex_client", [True], indirect=True)
 @pytest.mark.parametrize("operation", ["generations", "edits"])
-@pytest.mark.parametrize("payload", [None, [], {}, {"model": ""},
-                                     {"model": "gpt-image-2", "stream": "false"}])
+@pytest.mark.parametrize(
+    "payload", [None, [], {}, {"model": ""}, {"model": "gpt-image-2", "stream": "false"}]
+)
 async def test_invalid_image_requests_do_not_reach_upstream(
-    codex_client: httpx.AsyncClient, operation: str, payload: object,
+    codex_client: httpx.AsyncClient,
+    operation: str,
+    payload: object,
 ) -> None:
     response = await codex_client.post(f"/v1/images/{operation}", content=json.dumps(payload))
     assert response.status_code == 400
@@ -561,13 +856,21 @@ async def test_invalid_image_requests_do_not_reach_upstream(
 @pytest.mark.parametrize("operation", ["generations", "edits"])
 @pytest.mark.parametrize("status", [401, 429, 500])
 async def test_native_image_upstream_errors_are_relayed(
-    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock, operation: str, status: int,
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+    operation: str,
+    status: int,
 ) -> None:
     error = {"error": {"message": "upstream image error", "type": "api_error"}}
-    httpx_mock.add_response(url=f"https://chatgpt.com/backend-api/codex/images/{operation}",
-                            status_code=status, json=error, headers={"retry-after": "5"})
-    response = await codex_client.post(f"/v1/images/{operation}",
-                                       json={"model": "gpt-image-2", "prompt": "test"})
+    httpx_mock.add_response(
+        url=f"https://chatgpt.com/backend-api/codex/images/{operation}",
+        status_code=status,
+        json=error,
+        headers={"retry-after": "5"},
+    )
+    response = await codex_client.post(
+        f"/v1/images/{operation}", json={"model": "gpt-image-2", "prompt": "test"}
+    )
     assert response.status_code == status
     assert response.json() == error
     assert response.headers["retry-after"] == "5"
@@ -575,16 +878,21 @@ async def test_native_image_upstream_errors_are_relayed(
 
 @pytest.mark.parametrize("codex_client", [True], indirect=True)
 async def test_native_image_transport_failure_finishes_the_tracker(
-    codex_client: httpx.AsyncClient, httpx_mock: HTTPXMock,
+    codex_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
 ) -> None:
-    httpx_mock.add_exception(httpx.ReadTimeout("synthetic timeout"),
-                             url="https://chatgpt.com/backend-api/codex/images/generations")
-    response = await codex_client.post("/v1/images/generations",
-                                       json={"model": "gpt-image-2", "prompt": "test"})
+    httpx_mock.add_exception(
+        httpx.ReadTimeout("synthetic timeout"),
+        url="https://chatgpt.com/backend-api/codex/images/generations",
+    )
+    response = await codex_client.post(
+        "/v1/images/generations", json={"model": "gpt-image-2", "prompt": "test"}
+    )
     assert response.status_code == 504
     snapshot = Monitor.current().snapshot()
     assert snapshot["active"] == []
     assert snapshot["totals"]["errors"] == 1
+
 
 @pytest.mark.parametrize("codex_client", [True], indirect=True)
 async def test_native_discovery_refreshes_removals_metadata_and_account_scope(

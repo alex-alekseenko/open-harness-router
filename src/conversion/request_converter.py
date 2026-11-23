@@ -150,7 +150,8 @@ def convert_claude_to_openai(  # noqa: PLR0912, PLR0915
     }
     logger.debug(
         "converted claude request to openai format",
-        openai_request=openai_request,
+        model=openai_model,
+        message_count=len(openai_messages),
     )
     if claude_request.stop_sequences:
         openai_request["stop"] = claude_request.stop_sequences
@@ -681,6 +682,7 @@ def convert_claude_to_responses(
 
     logger.debug(
         "converted claude request to responses format",
-        responses_request=responses_request,
+        model=openai_model,
+        input_count=len(responses_request["input"]),
     )
     return responses_request
