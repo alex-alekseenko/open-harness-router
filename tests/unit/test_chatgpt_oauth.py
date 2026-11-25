@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from auth.chatgpt_oauth import (
@@ -62,7 +65,22 @@ class TestTokenStore:
     def test_no_temp_left_behind(self, tmp_path: Path) -> None:
         store = ChatGPTTokenStore(tmp_path / "auth.json")
         store.save(_fresh_credential())
-        assert list(tmp_path.iterdir()) == [tmp_path / "auth.json"]
+        assert not list(tmp_path.glob("*.tmp"))
+
+    async def test_multiple_writers_leave_one_complete_credential(self, tmp_path: Path) -> None:
+        path = tmp_path / "auth.json"
+        records = [_fresh_credential(f"acc-{i}") for i in range(8)]
+        start = threading.Barrier(len(records))
+
+        def write(record: dict) -> None:
+            writer = ChatGPTTokenStore(path)
+            start.wait(timeout=5)
+            writer.save(record)
+
+        await asyncio.gather(*(asyncio.to_thread(write, record) for record in records))
+        assert ChatGPTTokenStore(path).load() in records
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert not list(tmp_path.glob("*.tmp"))
 
     def test_corrupt_file_is_absent_not_fatal(self, tmp_path: Path) -> None:
         path = tmp_path / "auth.json"
@@ -83,6 +101,14 @@ class TestTokenStore:
 
 
 class TestTokenResponse:
+    @pytest.mark.parametrize("invalid", [None, "", "   ", 42])
+    def test_rejects_unusable_account_id_before_replacing_credential(self, invalid: object) -> None:
+        previous = _fresh_credential()
+        bad_token = _fake_jwt({"https://api.openai.com/auth": {"chatgpt_account_id": invalid}})
+        with pytest.raises(ChatGPTAuthError, match="subscription account ID"):
+            _merge_token_response(previous, {"access_token": bad_token})
+        assert previous["account_id"] == "acc-123"
+
     def test_account_id_from_access_token(self) -> None:
         merged = _merge_token_response(
             {"refresh_token": "", "id_token": "", "account_id": "", "email": ""},
@@ -162,8 +188,8 @@ class TestProviderHeaders:
 
         refreshed = _fresh_credential("acc-refreshed")
 
-        def fake_refresh(http, refresh_token: str) -> dict:
-            assert refresh_token == "rt-old"
+        def fake_refresh(http, previous: dict) -> dict:
+            assert previous["refresh_token"] == "rt-old"
             return refreshed
 
         monkeypatch.setattr("auth.chatgpt_oauth.refresh_tokens", fake_refresh)
@@ -185,8 +211,8 @@ class TestProviderHeaders:
 
         calls: list[str] = []
 
-        def fake_refresh(http, refresh_token: str) -> dict:
-            calls.append(refresh_token)
+        def fake_refresh(http, previous: dict) -> dict:
+            calls.append(previous["refresh_token"])
             time.sleep(0.05)
             return _fresh_credential("acc-once")
 
@@ -236,3 +262,62 @@ class TestSchemaValidation:
         kwargs["tls_verify_hostname"] = False
         with pytest.raises(Exception, match="TLS hostname verification"):
             ProviderCfg(**kwargs)
+
+
+async def test_refresh_http_preserves_optional_fields(tmp_path: Path, httpx_mock) -> None:
+    store = ChatGPTTokenStore(tmp_path / "auth.json")
+    previous = {**_fresh_credential(), "expires_at": 1}
+    store.save(previous)
+    httpx_mock.add_response(
+        url="https://auth.openai.com/oauth/token",
+        json={
+            "access_token": _fake_jwt(_auth_claim()),
+            "expires_in": 3600,
+        },
+    )
+    await ChatGPTOAuthProvider(store).get_auth_headers()
+    current = store.load()
+    for key in ("refresh_token", "id_token", "email"):
+        assert current[key] == previous[key]
+
+
+@pytest.mark.parametrize("interruption", ["relogin", "delete", "cancel"])
+async def test_inflight_rotation(tmp_path: Path, monkeypatch, interruption: str) -> None:
+    store = ChatGPTTokenStore(tmp_path / "auth.json")
+    store.save({**_fresh_credential("old"), "expires_at": 1})
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def refresh(http: httpx.Client, previous: dict) -> dict:
+        calls.append(previous["account_id"])
+        entered.set()
+        assert release.wait(5)
+        return {**_fresh_credential("old"), "refresh_token": "rotated"}
+
+    monkeypatch.setattr("auth.chatgpt_oauth.refresh_tokens", refresh)
+    provider = ChatGPTOAuthProvider(store)
+    task = asyncio.create_task(provider.get_auth_headers())
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        if interruption == "relogin":
+            replacement = _fresh_credential("new")
+            ChatGPTTokenStore(store.path).save(replacement)
+        elif interruption == "delete":
+            store.path.unlink()
+        else:
+            task.cancel()
+    finally:
+        release.set()
+    if interruption == "relogin":
+        assert (await task)["chatgpt-account-id"] == "new"
+        assert store.load() == replacement
+    elif interruption == "delete":
+        with pytest.raises(ChatGPTAuthError):
+            await task
+        assert not store.path.exists()
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await provider.get_auth_headers()
+        assert store.load()["refresh_token"] == "rotated"
+    assert calls == ["old"]

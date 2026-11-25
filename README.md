@@ -154,7 +154,9 @@ routes are unchanged. Requests ask for `reasoning.encrypted_content` and
 the router replays the returned reasoning items before the corresponding
 tool call on later turns, keeping multi-turn tool use coherent. Tokens
 refresh automatically; re-run the login CLI after account changes that
-revoke the refresh token.
+revoke the refresh token. The subscription credential store uses POSIX advisory
+locks (macOS/Linux) to coordinate token rotation and login across processes.
+Leave the lock files alongside the credential while the router is running.
 
 To keep **all normal Codex models plus custom models in the same picker**,
 add a native Responses fallback and merge the catalog from your normal Codex

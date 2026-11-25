@@ -556,54 +556,21 @@ class OpenAITranslateProvider:
             cancel_event = asyncio.Event()
             self.active_requests[request_id] = cancel_event
 
-        # The subscription backend is streaming-only; the stream is forced
-        # in _build_openai_request. For a non-streaming client request,
-        # aggregate the SSE here: the Responses stream ends with a terminal
-        # ``response.completed`` / ``response.incomplete`` /
-        # ``response.failed`` event carrying the full response object.
         if self.cfg.chatgpt_oauth:
-            stream = None
+            if not request_id:
+                return await self._aggregate_subscription(request, None)
+            work = asyncio.create_task(self._aggregate_subscription(request, request_id))
+            cancelled = asyncio.create_task(self.active_requests[request_id].wait())
             try:
-                stream = await self.create_stream(request, request_id)
-                async for event in stream:
-                    event_type = getattr(event, "type", None)
-                    if event_type in (
-                        "response.completed",
-                        "response.incomplete",
-                        "response.failed",
-                    ):
-                        response_obj = getattr(event, "response", None)
-                        if response_obj is None:
-                            break
-                        if event_type == "response.failed":
-                            err = getattr(response_obj, "error", None)
-                            detail = getattr(err, "message", None) or "upstream response failed"
-                            raise ProviderError(detail, 502)
-                        # completed and incomplete both carry the full
-                        # response object, which is exactly what a
-                        # non-streaming ``responses.create`` would have
-                        # returned; incomplete keeps the partial answer
-                        # and its own status/finish reason.
-                        aggregated: dict[str, Any] = response_obj.model_dump()
-                        return aggregated
-            except ProviderError:
-                raise
-            except APIError as exc:
-                # SDK SSE errors flow through the normal provider error
-                # mapping, same as the ordinary request path.
-                raise self._to_provider_error(exc) from exc
-            except Exception as exc:
-                raise ProviderError(f"subscription stream failed: {exc}", 502) from exc
+                await asyncio.wait((work, cancelled), return_when=asyncio.FIRST_COMPLETED)
+                if self.active_requests[request_id].is_set():
+                    raise ProviderError("Request cancelled by client", 499)
+                return await work
             finally:
-                # Same cleanup the ordinary path performs: the request
-                # entry goes away whether the stream failed, was cancelled
-                # mid-aggregation, or completed; the upstream stream is
-                # closed whenever one was opened.
-                if request_id:
-                    self.active_requests.pop(request_id, None)
-                if stream is not None:
-                    await stream.close()
-            raise ProviderError("upstream closed the stream without a terminal event", 502)
+                work.cancel()
+                cancelled.cancel()
+                await asyncio.gather(work, cancelled, return_exceptions=True)
+                self.active_requests.pop(request_id, None)
 
         try:
             # The SDK overload cannot be inferred from a dict argument, but
@@ -645,6 +612,50 @@ class OpenAITranslateProvider:
         finally:
             if request_id and request_id in self.active_requests:
                 del self.active_requests[request_id]
+
+    async def _aggregate_subscription(
+        self, request: dict[str, Any], request_id: str | None
+    ) -> dict[str, Any]:
+        """Consume the streaming-only backend, closing it on cancellation or exit."""
+        stream = None
+        try:
+            stream = await self.create_stream(request, request_id)
+            async for event in stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "error":
+                    raise ProviderError(getattr(event, "message", None) or "upstream error", 502)
+                if event_type in (
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                ):
+                    response_obj = getattr(event, "response", None)
+                    if response_obj is None:
+                        break
+                    if event_type == "response.failed":
+                        err = getattr(response_obj, "error", None)
+                        detail = getattr(err, "message", None) or "upstream response failed"
+                        raise ProviderError(detail, 502)
+                    # completed and incomplete both carry the full
+                    # response object, which is exactly what a
+                    # non-streaming ``responses.create`` would have
+                    # returned; incomplete keeps the partial answer
+                    # and its own status/finish reason.
+                    aggregated: dict[str, Any] = response_obj.model_dump()
+                    return aggregated
+        except ProviderError:
+            raise
+        except APIError as exc:
+            # SDK SSE errors flow through the normal provider error
+            # mapping, same as the ordinary request path.
+            raise self._to_provider_error(exc) from exc
+        except Exception as exc:
+            raise ProviderError(f"subscription stream failed: {exc}", 502) from exc
+        finally:
+            if stream is not None:
+                await stream.close()
+        raise ProviderError("upstream closed the stream without a terminal event", 502)
+
 
     async def _within_quota(
         self, call: Callable[[], Awaitable[_CallResult]], request_id: str | None
@@ -1335,8 +1346,6 @@ class OpenAITranslateProvider:
         return _json_result(200, {"input_tokens": estimate_openai_request_tokens(openai_request)})
 
     async def aclose(self) -> None:
-        """Close the OpenAI client, the httpx client and the OAuth holder."""
+        """Close the OpenAI and httpx clients."""
         await self._client.close()
         await self._http_client.aclose()
-        if self._oauth is not None:
-            self._oauth.close()

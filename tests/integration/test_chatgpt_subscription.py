@@ -9,6 +9,7 @@ injection, active_requests cleanup, and the two-turn
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
@@ -473,7 +474,8 @@ async def test_two_turn_tool_use_replays_encrypted_reasoning(
         i for i, item in enumerate(input_items) if item.get("type") == "reasoning"
     ]
     function_positions = [
-        i for i, item in enumerate(input_items)
+        i
+        for i, item in enumerate(input_items)
         if item.get("type") == "function_call" and item.get("call_id") == calls[0]["id"]
     ]
     assert reasoning_positions, "encrypted reasoning item was not replayed"
@@ -481,3 +483,69 @@ async def test_two_turn_tool_use_replays_encrypted_reasoning(
     assert reasoning_positions[0] < function_positions[0]
     replayed = input_items[reasoning_positions[0]]
     assert replayed.get("encrypted_content") == "ENC-REASONING-PAYLOAD"
+
+
+async def test_empty_token_limited_response(
+    subscription_client: httpx.AsyncClient, httpx_mock: HTTPXMock
+) -> None:
+    event = _incomplete_event()
+    event["response"]["output"] = []
+    httpx_mock.add_response(url=SUBSCRIPTION_URL, content=_sse([event]))
+    response = await _post_messages(
+        subscription_client, "OAI/gpt-test", [{"role": "user", "content": "hi"}]
+    )
+    assert response.status_code == 200
+    assert response.json()["stop_reason"] == "max_tokens"
+    assert response.json()["usage"]["output_tokens"] == 8
+
+
+async def test_flat_stream_error_preserves_message(
+    subscription_client: httpx.AsyncClient, httpx_mock: HTTPXMock
+) -> None:
+    event = {"type": "error", "code": "server_error", "message": "synthetic upstream detail"}
+    httpx_mock.add_response(url=SUBSCRIPTION_URL, content=_sse([event]))
+    response = await _post_messages(
+        subscription_client, "OAI/gpt-test", [{"role": "user", "content": "hi"}]
+    )
+    assert response.status_code == 502
+    assert event["message"] in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("phase", ["opening", "reading"])
+async def test_cancellation_during_subscription_aggregation(
+    subscription_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    provider = subscription_client._transport.app.state.registry.providers["chatgpt_subscription"]
+    paused, closed = asyncio.Event(), asyncio.Event()
+
+    async def stall():
+        paused.set()
+        await asyncio.Event().wait()
+
+    class Stream:
+        async def __aiter__(self):
+            await stall()
+            yield _completed_event()
+
+        async def close(self):
+            closed.set()
+
+    async def open_stream(*args):
+        if phase == "opening":
+            await stall()
+        return Stream()
+
+    monkeypatch.setattr(provider, "create_stream", open_stream)
+    task = asyncio.create_task(
+        _post_messages(subscription_client, "OAI/gpt-test", [{"role": "user", "content": "hi"}])
+    )
+    try:
+        await asyncio.wait_for(paused.wait(), 2)
+        assert provider.cancel_request(next(iter(provider.active_requests)))
+        response = await asyncio.wait_for(task, 2)
+        assert response.status_code == 499
+        assert not provider.active_requests
+        assert closed.is_set() == (phase == "reading")
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

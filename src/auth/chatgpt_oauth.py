@@ -7,6 +7,10 @@ stored under ``state/chatgpt_auth.json`` (0600) and refreshed
 automatically. The router never reads the Codex CLI's own ``auth.json`` --
 this is a separate, independently issued credential for the same account.
 
+Credential writers (the login CLI and any number of running router
+processes) coordinate through one advisory lock on the store's directory,
+so a re-login can never interleave with a refresh's read-modify-write.
+
 Request contract for the subscription backend (verified against the Codex
 CLI binary and the CLIProxyAPI reference implementation):
 
@@ -28,12 +32,19 @@ import base64
 import contextlib
 import json
 import os
+import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+
+try:
+    import fcntl
+except ImportError:  # POSIX-only; Windows is untested (see README)
+    fcntl = None  # type: ignore[assignment]
 
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
@@ -76,7 +87,9 @@ def _parse_jwt_claims(token: str) -> dict[str, Any]:
     try:
         payload = token.split(".")[1]
         padding = "=" * (-len(payload) % 4)
-        claims: dict[str, Any] = json.loads(base64.urlsafe_b64decode(payload + padding))
+        claims = json.loads(base64.urlsafe_b64decode(payload + padding))
+        if not isinstance(claims, dict):
+            raise ValueError("expected JWT object")
         return claims
     except (IndexError, ValueError) as exc:
         raise ChatGPTAuthError("token is not a valid JWT") from exc
@@ -91,8 +104,11 @@ def _extract_auth_fields(access_token: str, id_token: str | None) -> dict[str, s
     """
     claims = _parse_jwt_claims(access_token)
     auth = claims.get("https://api.openai.com/auth", {})
+    account_id = auth.get("chatgpt_account_id") if isinstance(auth, dict) else None
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise ChatGPTAuthError("access token is missing its subscription account ID")
     fields = {
-        "account_id": str(auth.get("chatgpt_account_id", "")),
+        "account_id": account_id,
         "plan_type": str(auth.get("chatgpt_plan_type", "")),
     }
     if id_token:
@@ -164,14 +180,20 @@ def exchange_code(http: httpx.Client, code: str, code_verifier: str) -> dict[str
     )
 
 
-def refresh_tokens(http: httpx.Client, refresh_token: str) -> dict[str, Any]:
-    """Refresh the access token; returns the stored layout (new refresh token)."""
+def refresh_tokens(http: httpx.Client, previous: dict[str, Any]) -> dict[str, Any]:
+    """Refresh the access token; returns the next stored generation.
+
+    The FULL previous credential is the merge base, so a response that
+    omits the optional ``refresh_token``/``id_token`` replacements keeps
+    the previous values -- the id_token and the email included -- instead
+    of clearing them.
+    """
     response = http.post(
         TOKEN_URL,
         data={
             "grant_type": "refresh_token",
             "client_id": CLIENT_ID,
-            "refresh_token": refresh_token,
+            "refresh_token": previous["refresh_token"],
             "scope": "openid profile email",
         },
         headers={"Accept": "application/json"},
@@ -184,10 +206,7 @@ def refresh_tokens(http: httpx.Client, refresh_token: str) -> dict[str, Any]:
         raise ChatGPTAuthError("token refresh response missing access_token")
     # The refresh token itself carries the previous credential forward (an
     # omitted replacement keeps the old one valid).
-    return _merge_token_response(
-        {"refresh_token": refresh_token, "id_token": "", "account_id": "", "email": ""},
-        body,
-    )
+    return _merge_token_response(previous, body)
 
 
 class ChatGPTTokenStore:
@@ -201,8 +220,6 @@ class ChatGPTTokenStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._lock = asyncio.Lock()
-        self._save_count = 0
 
     def load(self) -> dict[str, Any] | None:
         """Read and shape-validate the stored credential.
@@ -211,22 +228,44 @@ class ChatGPTTokenStore:
         exists but does not hold the required fields is treated as absent
         rather than aborting the registry.
         """
-        if not self.path.exists():
-            return None
         try:
             data = json.loads(self.path.read_text())
-        except ValueError:
+        except (OSError, ValueError):
             return None
         if not isinstance(data, dict) or any(not data.get(f) for f in _REQUIRED_STORE_FIELDS):
             return None
         return data
 
-    def save(self, data: dict[str, Any]) -> None:
-        """Atomically replace the stored credential with 0600 permissions."""
+    @contextlib.contextmanager
+    def locked(self, purpose: str) -> Iterator[None]:
+        """Lock a stable sidecar, not the credential inode replaced by each save."""
+        if fcntl is None:
+            raise ChatGPTAuthError("subscription credential locking requires POSIX")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._save_count += 1
-        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{self._save_count}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        lock_path = self.path.with_name(f".{self.path.name}.{purpose}.lock")
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def save(self, data: dict[str, Any]) -> None:
+        with self.locked("write"):
+            self._replace(data)
+
+    def publish_refresh(self, previous: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+        with self.locked("write"):
+            current = self.load()
+            if current is None:
+                raise ChatGPTAuthError("subscription credential removed; run cli.chatgpt_login")
+            if current != previous:
+                return current
+            self._replace(new)
+            return new
+
+    def _replace(self, data: dict[str, Any]) -> None:
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name + ".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as handle:
                 handle.write(json.dumps(data, indent=2))
@@ -240,85 +279,40 @@ class ChatGPTTokenStore:
 
 
 class ChatGPTOAuthProvider:
-    """Live credential holder: fresh access token + headers for the backend.
-
-    Refresh is coordinated PER STORE (a module-level registry keyed by
-    resolved path), so two providers sharing one token file cannot refresh
-    concurrently, a re-login is picked up from disk on the next request,
-    and a refresh started before a new login merges into -- never
-    overwrites -- the newer on-disk generation.
-    """
-
-    _store_locks: dict[Path, asyncio.Lock] = {}
+    """Use disk as the source of truth; never resurrect a removed credential."""
 
     def __init__(self, store: ChatGPTTokenStore) -> None:
         self._store = store
-        self._http: httpx.Client | None = None
-        self._cached: dict[str, Any] | None = None
-        key = store.path.resolve()
-        if key not in ChatGPTOAuthProvider._store_locks:
-            ChatGPTOAuthProvider._store_locks[key] = asyncio.Lock()
-        self._refresh_lock = ChatGPTOAuthProvider._store_locks[key]
-
-    def _http_client(self) -> httpx.Client:
-        if self._http is None:
-            self._http = httpx.Client()
-        return self._http
 
     def _require_data(self) -> dict[str, Any]:
-        """The current credential, preferring the on-disk generation.
-
-        Lazy (instead of failing at router startup) so the rest of the
-        router keeps working before the one-time login has been run; a
-        missing/unusable credential surfaces per request on the OAuth
-        route, and a re-login replaces the cached copy transparently.
-        """
         data = self._store.load()
-        if data is None and self._cached is not None:
-            data = self._cached
         if data is None:
             raise ChatGPTAuthError(
-                f"no ChatGPT subscription credential at {self._store.path}; "
-                "run 'PYTHONPATH=src .venv/bin/python -m cli.chatgpt_login' first"
+                f"no ChatGPT subscription credential at {self._store.path}; run cli.chatgpt_login"
             )
-        self._cached = data
         return data
 
-    def _is_fresh(self, data: dict[str, Any]) -> bool:
-        return float(data.get("expires_at", 0)) > time.time() + _REFRESH_MARGIN_S
+    @staticmethod
+    def _is_fresh(data: dict[str, Any]) -> bool:
+        return float(data["expires_at"]) > time.time() + _REFRESH_MARGIN_S
+
+    def _rotate(self) -> dict[str, Any]:
+        # The worker owns the lock, HTTP client and persistence. Cancelling a
+        # waiter cannot interrupt rotation after the server consumed the token.
+        # Login takes only the short write lock, never the HTTP-duration lock.
+        with self._store.locked("refresh"):
+            previous = self._require_data()
+            if self._is_fresh(previous):
+                return previous
+            with httpx.Client() as http:
+                new = refresh_tokens(http, previous)
+            return self._store.publish_refresh(previous, new)
 
     async def get_auth_headers(self) -> dict[str, str]:
-        """Return Bearer + account headers, refreshing first if expired.
-
-        The store lock is per credential file: concurrent providers and
-        concurrent requests serialize their refresh, always re-reading
-        the newest on-disk generation inside the critical section.
-        """
         data = self._require_data()
-        if self._is_fresh(data):
-            return self._headers(data)
-
-        async with self._refresh_lock:
-            data = self._require_data()
-            if self._is_fresh(data):
-                return self._headers(data)
-            previous = dict(data)
-            new = await asyncio.to_thread(
-                refresh_tokens, self._http_client(), previous["refresh_token"]
-            )
-            # Merge into the CURRENT disk generation so a re-login that
-            # happened while we waited never gets overwritten: keep the
-            # newer refresh token when ours was replaced meanwhile.
-            current = self._store.load()
-            if (
-                current is not None
-                and current is not data
-                and current.get("refresh_token") != previous["refresh_token"]
-            ):
-                new["refresh_token"] = current["refresh_token"]
-            self._store.save(new)
-            self._cached = new
-            return self._headers(new)
+        if not self._is_fresh(data):
+            data = await asyncio.to_thread(self._rotate)
+        return self._headers(data)
 
     def _headers(self, data: dict[str, Any]) -> dict[str, str]:
         return {
@@ -327,9 +321,3 @@ class ChatGPTOAuthProvider:
             "originator": ORIGINATOR,
             "user-agent": USER_AGENT,
         }
-
-    def close(self) -> None:
-        """Close the credential holder's HTTP client (provider shutdown)."""
-        if self._http is not None:
-            self._http.close()
-            self._http = None
