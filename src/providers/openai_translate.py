@@ -42,7 +42,11 @@ from openai.types.chat import ChatCompletionChunk
 from openai.types.responses import ResponseStreamEvent
 from pydantic import BaseModel, SecretStr, ValidationError
 
-from auth.chatgpt_oauth import ChatGPTOAuthProvider, ChatGPTTokenStore
+from auth.chatgpt_oauth import (
+    SUBSCRIPTION_ENDPOINT,
+    ChatGPTOAuthProvider,
+    ChatGPTTokenStore,
+)
 from const import (
     CAPABILITY_REJECTED_HEADER,
     CLAUDE_BUILTIN_TOOL_NAMES,
@@ -460,11 +464,16 @@ class OpenAITranslateProvider:
         self._oauth: ChatGPTOAuthProvider | None = None
         if cfg.chatgpt_oauth:
             self._oauth = ChatGPTOAuthProvider(ChatGPTTokenStore(Path("state/chatgpt_auth.json")))
-        self._http_client = httpx.AsyncClient(
-            timeout=timeout,
-            transport=build_upstream_transport(upstream, verify),
-            **({"auth": self._oauth_auth()} if self._oauth else {}),
-        )
+            self._http_client = httpx.AsyncClient(
+                timeout=timeout,
+                transport=build_upstream_transport(upstream, verify),
+                auth=self._oauth_auth(),
+            )
+        else:
+            self._http_client = httpx.AsyncClient(
+                timeout=timeout,
+                transport=build_upstream_transport(upstream, verify),
+            )
         # max_retries is set explicitly: the SDK default (2) was exhausted in
         # ~1.5s and dropped the client on 429/5xx that outlived that window.
         # Retries happen inside the SDK before AsyncStream is created, so the
@@ -496,15 +505,28 @@ class OpenAITranslateProvider:
     def _oauth_auth(self) -> httpx.Auth:
         """httpx auth that injects the live subscription headers per request.
 
-        The hook runs on every outgoing request, so a token refreshed
-        mid-session lands on the next request; the refresh itself is
-        single-flight inside the credential holder (auth.chatgpt_oauth).
+        Only called when ``cfg.chatgpt_oauth`` set the holder. The hook
+        runs on every outgoing request, so a token refreshed mid-session
+        lands on the next request; the refresh itself is coordinated per
+        credential store (auth.chatgpt_oauth). The destination is
+        re-checked on every request before the bearer is attached --
+        schema validation pins base_url at startup, this is the runtime
+        half of that guarantee.
         """
-
-        oauth = self._oauth
+        oauth = cast(ChatGPTOAuthProvider, self._oauth)
 
         class _SubscriptionAuth(httpx.Auth):
-            async def async_auth_flow(_self, request: httpx.Request):  # type: ignore[override]
+            # The callback belongs to the hook, not to the provider; the
+            # underscore name keeps ruff's self-convention check quiet.
+            async def async_auth_flow(
+                _self, request: httpx.Request  # noqa: N805
+            ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+                destination = str(request.url)
+                if not destination.startswith(SUBSCRIPTION_ENDPOINT):
+                    raise httpx.ConnectError(
+                        "refusing to attach the ChatGPT subscription credential "
+                        f"to a non-subscription destination: {destination}"
+                    )
                 headers = await oauth.get_auth_headers()
                 for key, value in headers.items():
                     request.headers[key] = value
@@ -534,21 +556,54 @@ class OpenAITranslateProvider:
             cancel_event = asyncio.Event()
             self.active_requests[request_id] = cancel_event
 
-        # The ChatGPT Codex backend is streaming-only; the stream is forced
+        # The subscription backend is streaming-only; the stream is forced
         # in _build_openai_request. For a non-streaming client request,
-        # aggregate the SSE here: the Responses stream always ends with a
-        # ``response.completed`` event carrying the full response object,
-        # which is exactly what a non-streaming ``responses.create`` would
-        # have returned.
+        # aggregate the SSE here: the Responses stream ends with a terminal
+        # ``response.completed`` / ``response.incomplete`` /
+        # ``response.failed`` event carrying the full response object.
         if self.cfg.chatgpt_oauth:
-            stream = await self.create_stream(request, request_id)
+            stream = None
             try:
+                stream = await self.create_stream(request, request_id)
                 async for event in stream:
-                    if getattr(event, "type", None) == "response.completed":
-                        return event.response.model_dump()
+                    event_type = getattr(event, "type", None)
+                    if event_type in (
+                        "response.completed",
+                        "response.incomplete",
+                        "response.failed",
+                    ):
+                        response_obj = getattr(event, "response", None)
+                        if response_obj is None:
+                            break
+                        if event_type == "response.failed":
+                            err = getattr(response_obj, "error", None)
+                            detail = getattr(err, "message", None) or "upstream response failed"
+                            raise ProviderError(detail, 502)
+                        # completed and incomplete both carry the full
+                        # response object, which is exactly what a
+                        # non-streaming ``responses.create`` would have
+                        # returned; incomplete keeps the partial answer
+                        # and its own status/finish reason.
+                        aggregated: dict[str, Any] = response_obj.model_dump()
+                        return aggregated
+            except ProviderError:
+                raise
+            except APIError as exc:
+                # SDK SSE errors flow through the normal provider error
+                # mapping, same as the ordinary request path.
+                raise self._to_provider_error(exc) from exc
+            except Exception as exc:
+                raise ProviderError(f"subscription stream failed: {exc}", 502) from exc
             finally:
-                await stream.close()
-            raise ProviderError("upstream closed the stream without a completed response", 502)
+                # Same cleanup the ordinary path performs: the request
+                # entry goes away whether the stream failed, was cancelled
+                # mid-aggregation, or completed; the upstream stream is
+                # closed whenever one was opened.
+                if request_id:
+                    self.active_requests.pop(request_id, None)
+                if stream is not None:
+                    await stream.close()
+            raise ProviderError("upstream closed the stream without a terminal event", 502)
 
         try:
             # The SDK overload cannot be inferred from a dict argument, but
@@ -1158,10 +1213,20 @@ class OpenAITranslateProvider:
         # to a body whose ``stream`` is missing or ``null``, and the SDK
         # serializes a ``None`` kwarg as ``null`` instead of dropping it.
         openai_request["stream"] = bool(parsed.stream)
-        # The ChatGPT Codex backend is streaming-only ("Stream must be set
-        # to true"); force it and aggregate for non-streaming clients.
         if self.cfg.chatgpt_oauth:
+            # The subscription backend is streaming-only ("Stream must be
+            # set to true"); force it and aggregate for non-streaming
+            # clients. It also rejects a stored response ("Store must be
+            # set to false"). Scoped here, NOT in the shared converter:
+            # the base Responses API defaults store to true for ordinary
+            # API-key routes, and that upstream behavior must not change.
             openai_request["stream"] = True
+            openai_request["store"] = False
+            # The documented field for carrying reasoning across stateless
+            # turns: the router replays the returned reasoning item (from
+            # its tool-call cache) before the corresponding tool call on
+            # the next turn.
+            openai_request.setdefault("include", []).append("reasoning.encrypted_content")
         return openai_request
 
     def _enforce_context_window(
@@ -1270,6 +1335,8 @@ class OpenAITranslateProvider:
         return _json_result(200, {"input_tokens": estimate_openai_request_tokens(openai_request)})
 
     async def aclose(self) -> None:
-        """Close the OpenAI and httpx clients."""
+        """Close the OpenAI client, the httpx client and the OAuth holder."""
         await self._client.close()
         await self._http_client.aclose()
+        if self._oauth is not None:
+            self._oauth.close()

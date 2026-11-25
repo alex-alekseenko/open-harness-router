@@ -25,8 +25,8 @@ from pathlib import Path
 import httpx
 
 from auth.chatgpt_oauth import (
+    REDIRECT_PATH,
     REDIRECT_PORT,
-    REDIRECT_URI,
     ChatGPTAuthError,
     ChatGPTTokenStore,
     build_authorize_url,
@@ -34,9 +34,11 @@ from auth.chatgpt_oauth import (
 )
 
 STORE_PATH = Path("state/chatgpt_auth.json")
+_TIMEOUT_S = 600
 
 
 def _pkce() -> tuple[str, str]:
+    """PKCE verifier and S256 challenge for the authorization request."""
     verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode()).digest()
@@ -60,16 +62,27 @@ def main() -> int:
     code_holder: dict[str, str] = {}
 
     class CallbackHandler(http.server.BaseHTTPRequestHandler):
+        """Only the exact callback path counts; anything else is ignored.
+
+        A missing or mismatched state, a favicon request or any other
+        stray GET must NOT resolve or end the login: the handler keeps
+        serving until a valid callback arrives or the deadline passes.
+        """
+
         def do_GET(self) -> None:  # noqa: N802 - http.server API
             parsed = urllib.parse.urlparse(self.path)
+            if parsed.path != REDIRECT_PATH:
+                self.send_response(404)
+                self.end_headers()
+                return
             params = urllib.parse.parse_qs(parsed.query)
+            if params.get("state", [""])[0] != state:
+                # Wrong state: not our callback; do not resolve the login.
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"state mismatch; retry the login")
+                return
             if "code" in params:
-                if params.get("state", [state])[0] != state:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(b"state mismatch; retry the login")
-                    code_holder["error"] = "state mismatch"
-                    return
                 code_holder["code"] = params["code"][0]
                 self.send_response(200)
                 self.end_headers()
@@ -79,17 +92,25 @@ def main() -> int:
                 self.send_response(400)
                 self.end_headers()
                 self.wfile.write(b"Login failed; check the terminal.")
+
         def log_message(self, *args: object) -> None:
             pass  # keep the console clean
 
     server = http.server.HTTPServer(("127.0.0.1", REDIRECT_PORT), CallbackHandler)
-    thread = threading.Thread(target=server.handle_request, daemon=True)
+    deadline = threading.Event()
+
+    def serve_until_resolved() -> None:
+        while not code_holder and not deadline.is_set():
+            server.handle_request()
+
+    thread = threading.Thread(target=serve_until_resolved, daemon=True)
     thread.start()
 
     print(f"Opening {url}")
     webbrowser.open(url)
-    print(f"waiting for the login redirect on {REDIRECT_URI} ...")
-    thread.join(timeout=600)
+    print("waiting for the login redirect on http://localhost:1455/auth/callback ...")
+    thread.join(timeout=_TIMEOUT_S)
+    deadline.set()
     server.server_close()
 
     if "error" in code_holder:

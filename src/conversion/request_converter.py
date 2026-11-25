@@ -644,11 +644,6 @@ def convert_claude_to_responses(
             max_tokens_limit,
         ),
         "reasoning": {"effort": effort},
-        # Codex-family backends (chatgpt.com/backend-api/codex) reject any
-        # request with store unset/true ("Store must be set to false");
-        # api.openai.com accepts false as well. Codex CLI itself always
-        # sends false.
-        "store": False,
         "stream": bool(claude_request.stream),
     }
 

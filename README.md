@@ -102,6 +102,60 @@ The example capabilities follow the
 [Kimi Code Codex guide](https://www.kimi.com/code/docs/en/third-party-tools/codex.html);
 adjust them for the model and membership tier you use.
 
+## Using the ChatGPT subscription from Claude Code
+
+`chatgpt_oauth` providers route the Anthropic Messages path (Claude Code)
+to the ChatGPT subscription backend: the router holds **its own** OAuth
+credential — obtained through a one-time browser login, never by reading
+the Codex CLI's `auth.json` — and translates Messages requests into
+Responses requests against `chatgpt.com/backend-api/codex`. Billing goes
+through the subscription quota, the same way the Anthropic passthrough
+provider goes through the Claude Code subscription.
+
+One-time login (opens the browser, stores the credential in
+`state/chatgpt_auth.json` with 0600 permissions, gitignored):
+
+```bash
+PYTHONPATH=src .venv/bin/python -m cli.chatgpt_login
+```
+
+Then add the provider and rules to `routing.yaml`:
+
+```yaml
+providers:
+  chatgpt_subscription:
+    type: openai-translate
+    base_url: https://chatgpt.com/backend-api/codex
+    api_flavor: responses
+    chatgpt_oauth: true
+    max_tokens_limit: 128000
+    context_window: 1048576
+    timeout_s: 180
+
+rules:
+  - match: {type: exact, value: "OAI/gpt-6.2-sol"}
+    provider: chatgpt_subscription
+    upstream_model: gpt-6.2-sol
+```
+
+Constraints enforced at startup: the `base_url` is pinned to the
+subscription endpoint exactly (the credential is a live account bearer and
+must never reach another destination), TLS hostname verification is
+required, `api_key_env` is rejected (OAuth replaces the static key), and
+the provider may not be `responses_default` — the native Responses
+transport is deliberately not built for it, so Codex clients must not fall
+back to it.
+
+Routing notes: the subscription backend is streaming-only and rejects
+stored responses, so the provider forces `stream: true` (aggregating the
+terminal SSE event for non-streaming clients) and sends `store: false`;
+both apply only to `chatgpt_oauth` routes, ordinary API-key Responses
+routes are unchanged. Requests ask for `reasoning.encrypted_content` and
+the router replays the returned reasoning items before the corresponding
+tool call on later turns, keeping multi-turn tool use coherent. Tokens
+refresh automatically; re-run the login CLI after account changes that
+revoke the refresh token.
+
 To keep **all normal Codex models plus custom models in the same picker**,
 add a native Responses fallback and merge the catalog from your normal Codex
 installation. For ChatGPT subscription sign-in:
