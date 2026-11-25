@@ -1229,6 +1229,14 @@ finish instead of cutting them off mid-stream.
 
 ## Connecting Claude Code
 
+You can resume a Claude Code conversation containing `thinking` or
+`redacted_thinking` blocks on a translated route. The router omits these
+model-specific blocks during translation and preserves visible text and tool calls.
+It also accepts reasoning blocks with omitted payloads and empty tool results.
+If another block prevents translation, the 400 identifies the first failing field
+or block. For an unsupported block type, resume the conversation on a route
+that supports it, or start a new conversation with a task summary.
+
 Authentication on the native path is the claude.ai OAuth subscription. This
 is a configuration documented as supported (`llm-gateway.md`, "Subscriptions
 and gateways"): with `ANTHROPIC_BASE_URL` set and no gateway credential, the

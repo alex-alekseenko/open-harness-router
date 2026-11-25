@@ -105,7 +105,9 @@ def convert_claude_to_openai(  # noqa: PLR0912, PLR0915
                 )
                 pending_system_text.clear()
             openai_message = convert_claude_assistant_message(msg)
-            openai_messages.append(openai_message)
+            # A reasoning-only turn has no Chat Completions message to send.
+            if openai_message["content"] is not None or openai_message.get("tool_calls"):
+                openai_messages.append(openai_message)
 
             if i + 1 < len(claude_request.messages):
                 next_msg = claude_request.messages[i + 1]

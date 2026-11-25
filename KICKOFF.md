@@ -19,6 +19,9 @@ flowchart TD
 ```
 
 - Messages requests use passthrough or the existing OpenAI translation pipeline.
+  Translation accepts Claude thinking blocks in conversation history and omits
+  them from the converted assistant content. Empty tool results retain their call
+  IDs. Translation errors identify the first failing field or unsupported block.
 - Codex uses native Responses when `responses_base_url` is configured.
   An `openai-translate` provider with `api_flavor: responses` also serves native
   Responses using its `base_url`; that setting is invalid for `passthrough`.

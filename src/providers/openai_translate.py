@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import math
+import re
 import time
 import uuid
 from collections.abc import (
@@ -387,7 +388,28 @@ def _json_result(
 
 def _invalid_request(exc: ValidationError) -> ProviderResult:
     """The 400 for a client body the Anthropic request schema rejects."""
-    return _json_result(400, anthropic_error_body("invalid_request_error", str(exc)))
+    error = exc.errors(include_input=False, include_url=False)[0]
+    loc = error["loc"]
+    detail = error["msg"]
+    if loc[:1] == ("messages",) and loc[2:4] == ("content", "blocks"):
+        # Pydantic includes the list union branch and the discriminator tag in
+        # the location. Only the index and field names exist in the request.
+        loc = loc[:3] + loc[4:5] + loc[6:]
+        if error["type"] == "union_tag_invalid":
+            tag = (error.get("ctx") or {}).get("tag", "")
+            label = f" '{tag}'" if re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", str(tag)) else ""
+            detail = (
+                f"This route cannot translate content block{label}. "
+                "Resume on a route that supports this block, or start a new conversation "
+                "with a summary of the task."
+            )
+        elif error["type"] == "union_tag_not_found":
+            detail = "A content block must have a type."
+        elif error["type"] == "list_type":
+            detail = "Expected a string or an array of content blocks."
+    path = "".join(f"[{part}]" if isinstance(part, int) else f".{part}" for part in loc)
+    message = f"{path.lstrip('.') or 'request'}: {detail}"
+    return _json_result(400, anthropic_error_body("invalid_request_error", message))
 
 
 async def _encode_sse(chunks: AsyncIterator[str]) -> AsyncIterator[bytes]:
