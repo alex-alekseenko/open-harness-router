@@ -41,6 +41,7 @@ from openai.types.chat import ChatCompletionChunk
 from openai.types.responses import ResponseStreamEvent
 from pydantic import BaseModel, SecretStr, ValidationError
 
+from auth.chatgpt_oauth import ChatGPTOAuthProvider, ChatGPTTokenStore
 from const import (
     CAPABILITY_REJECTED_HEADER,
     CLAUDE_BUILTIN_TOOL_NAMES,
@@ -409,7 +410,7 @@ class OpenAITranslateProvider:
         self,
         name: str,
         cfg: ProviderCfg,
-        api_key: SecretStr,
+        api_key: SecretStr | None,
         ca_bundle_path: Path | None,
         upstream: UpstreamSettings,
     ) -> None:
@@ -418,7 +419,9 @@ class OpenAITranslateProvider:
         Args:
             name: provider name in the registry.
             cfg: provider configuration.
-            api_key: upstream API key.
+            api_key: upstream API key, or None with ``chatgpt_oauth`` --
+                the provider then authenticates with the stored ChatGPT
+                subscription credential (auth.chatgpt_oauth) instead.
             ca_bundle_path: path to the CA bundle, or None for system roots.
             upstream: outbound connection settings (IPv4 binding, pool
                 limits).
@@ -432,8 +435,13 @@ class OpenAITranslateProvider:
             pool=10.0,
         )
         verify = build_upstream_verify(ca_bundle_path, cfg.tls_verify_hostname)
+        self._oauth: ChatGPTOAuthProvider | None = None
+        if cfg.chatgpt_oauth:
+            self._oauth = ChatGPTOAuthProvider(ChatGPTTokenStore(Path("state/chatgpt_auth.json")))
         self._http_client = httpx.AsyncClient(
-            timeout=timeout, transport=build_upstream_transport(upstream, verify)
+            timeout=timeout,
+            transport=build_upstream_transport(upstream, verify),
+            **({"auth": self._oauth_auth()} if self._oauth else {}),
         )
         # max_retries is set explicitly: the SDK default (2) was exhausted in
         # ~1.5s and dropped the client on 429/5xx that outlived that window.
@@ -441,7 +449,11 @@ class OpenAITranslateProvider:
         # streaming response never risks splicing two different generations
         # together.
         self._client = AsyncOpenAI(
-            api_key=api_key.get_secret_value(),
+            # With chatgpt_oauth the real Authorization header comes from
+            # the httpx auth hook; the SDK still requires some api_key, so
+            # the placeholder keeps it constructor-happy. The hook overwrites
+            # authorization, so the placeholder never reaches the wire.
+            api_key=api_key.get_secret_value() if api_key is not None else "chatgpt-oauth",
             base_url=cfg.base_url,
             default_headers=dict(cfg.extra_headers),
             http_client=self._http_client,
@@ -458,6 +470,25 @@ class OpenAITranslateProvider:
         # The gateway meters output tokens per key, so the window is the
         # provider's, not the request's: one gate for all of its requests.
         self._quota = QuotaGate(name)
+
+    def _oauth_auth(self) -> httpx.Auth:
+        """httpx auth that injects the live subscription headers per request.
+
+        The hook runs on every outgoing request, so a token refreshed
+        mid-session lands on the next request; the refresh itself is
+        single-flight inside the credential holder (auth.chatgpt_oauth).
+        """
+
+        oauth = self._oauth
+
+        class _SubscriptionAuth(httpx.Auth):
+            async def async_auth_flow(_self, request: httpx.Request):  # type: ignore[override]
+                headers = await oauth.get_auth_headers()
+                for key, value in headers.items():
+                    request.headers[key] = value
+                yield request
+
+        return _SubscriptionAuth()
 
     async def create_chat_completion(
         self, request: dict[str, Any], request_id: str | None = None
@@ -480,6 +511,22 @@ class OpenAITranslateProvider:
         if request_id:
             cancel_event = asyncio.Event()
             self.active_requests[request_id] = cancel_event
+
+        # The ChatGPT Codex backend is streaming-only; the stream is forced
+        # in _build_openai_request. For a non-streaming client request,
+        # aggregate the SSE here: the Responses stream always ends with a
+        # ``response.completed`` event carrying the full response object,
+        # which is exactly what a non-streaming ``responses.create`` would
+        # have returned.
+        if self.cfg.chatgpt_oauth:
+            stream = await self.create_stream(request, request_id)
+            try:
+                async for event in stream:
+                    if getattr(event, "type", None) == "response.completed":
+                        return event.response.model_dump()
+            finally:
+                await stream.close()
+            raise ProviderError("upstream closed the stream without a completed response", 502)
 
         try:
             # The SDK overload cannot be inferred from a dict argument, but
@@ -1089,6 +1136,10 @@ class OpenAITranslateProvider:
         # to a body whose ``stream`` is missing or ``null``, and the SDK
         # serializes a ``None`` kwarg as ``null`` instead of dropping it.
         openai_request["stream"] = bool(parsed.stream)
+        # The ChatGPT Codex backend is streaming-only ("Stream must be set
+        # to true"); force it and aggregate for non-streaming clients.
+        if self.cfg.chatgpt_oauth:
+            openai_request["stream"] = True
         return openai_request
 
     def _enforce_context_window(
