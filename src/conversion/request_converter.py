@@ -73,7 +73,7 @@ def convert_claude_to_openai(  # noqa: PLR0912, PLR0915
             if pending_system_text:
                 prepend_system_text(openai_message, "\n\n".join(pending_system_text))
                 pending_system_text.clear()
-            openai_messages.append(openai_message)
+            _append_user_turn(openai_messages, openai_message)
         elif msg.role == Constants.ROLE_SYSTEM:
             # Anthropic clients (including Claude Code) sometimes send a system
             # role inside the messages array, not only in the top-level system
@@ -194,6 +194,23 @@ def convert_claude_to_openai(  # noqa: PLR0912, PLR0915
             openai_request["tool_choice"] = "auto"
 
     return openai_request
+
+
+def _append_user_turn(messages: list[dict[str, Any]], turn: dict[str, Any]) -> None:
+    """After replay filtering, adjacent user turns must share one Chat message."""
+    if not messages or messages[-1]["role"] != Constants.ROLE_USER:
+        messages.append(turn)
+        return
+    previous = messages[-1]
+    left, right = previous["content"], turn["content"]
+    if isinstance(left, str) and isinstance(right, str):
+        previous["content"] = "\n\n".join(part for part in (left, right) if part)
+        return
+    # Multipart content stays multipart; do not stringify or reorder image parts.
+    previous["content"] = [
+        *([{"type": "text", "text": left}] if isinstance(left, str) else left),
+        *([{"type": "text", "text": right}] if isinstance(right, str) else right),
+    ]
 
 
 def append_system_text(message: dict[str, Any], text: str) -> None:

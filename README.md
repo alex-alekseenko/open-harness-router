@@ -297,8 +297,10 @@ the generated profile does not change the desktop's default provider.
 
 ### Provider compatibility
 
-Providers of type `openai-translate` with `api_flavor: responses` support native
-forwarding using their existing `base_url`; this flavor is invalid for
+API-key `openai-translate` providers with `api_flavor: responses` support native
+forwarding using their existing `base_url`. The `chatgpt_oauth` subscription
+provider uses Responses for Messages translation only: it has no native Responses
+transport and cannot be `responses_default`. The flavor is invalid for
 `passthrough`. Set `responses_base_url`, including the API prefix
 (usually `/v1`), to enable native forwarding independently of Messages routing.
 Verify that endpoint with text, streaming, function calls and tool-result
